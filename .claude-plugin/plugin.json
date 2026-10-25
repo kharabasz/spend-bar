@@ -1,6 +1,6 @@
 {
   "name": "spend-bar",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "license": "MIT",
   "description": "A bar above the prompt with session/weekly limits, prompt-cache status, context usage and a compact button",
   "types": "./types/index.d.ts",
@@ -10,7 +10,22 @@
       "title": "Prompt cache TTL",
       "description": "How long the prompt cache lives after the last response (1h on subscriptions, 5m on most API keys)",
       "default": "1h",
-      "options": ["1h", "5m"]
+      "options": [
+        "1h",
+        "5m"
+      ]
+    },
+    "collectStats": {
+      "type": "boolean",
+      "title": "Collect usage stats",
+      "description": "Record token use, tool calls, cache rewrites and context size (metadata only, no prompt text or file contents) for a later spend review",
+      "default": true
+    },
+    "statsDir": {
+      "type": "string",
+      "title": "Stats folder",
+      "description": "Where the event log is written; empty uses %LOCALAPPDATA%\\claude-building-blocks\\spend-bar\\events",
+      "default": ""
     }
   }
 }

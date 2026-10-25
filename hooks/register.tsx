@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, SessionContextUsage, SessionRateLimit } from 'claude-code'
 
 import type { Limit, Usage } from '../types'
+import { configureStats, hookStats, statsMeasured, statsSessionStarted, statsStepEnded, statsStepStarting } from './stats'
 
 const usage = atom({ plugin: 'spend-bar', key: 'usage' } as const, null)
 const lastResponseAt = atom({ plugin: 'spend-bar', key: 'lastResponseAt' } as const, null)
@@ -112,6 +113,9 @@ async function refresh($: EngineInterface) {
 }
 
 export const register: Register = (on, options) => {
+  configureStats(options)
+  hookStats(on)
+
   const ttlMs = options.cacheTtl === '5m' ? 5 * MINUTE : 60 * MINUTE
   // Amber in the last fifth of the TTL: 12m of an hour, 1m of five minutes.
   const cacheWarnMs = ttlMs / 5
@@ -126,18 +130,22 @@ export const register: Register = (on, options) => {
       void update($, now, () => Date.now())
     })
     stopTicking = () => timer.cancel()
+    await statsSessionStarted($, e.surface)
 
     return result
   })
 
   on('session.measure', async ($, e, next) => {
+    statsMeasured(e.context.percent ?? null)
     await update($, usage, () => toUsage(e.context, e.rateLimits))
 
     return next(e)
   })
 
   on('turn.step', async function* ($, e, next) {
+    const started = await statsStepStarting($, e)
     const result = yield* next(e)
+    statsStepEnded(e, result, started)
     if (e.agentId === undefined) {
       const at = await $.clock.now()
       await update($, lastResponseAt, () => at)
