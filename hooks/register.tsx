@@ -194,18 +194,29 @@ export const register: Register = (on, options) => {
       pills.push(pill('context', 'ok', 'ctx —'))
     }
 
+    const isTurnRunning = e.props.isWorking
+
+    // Compacting is a whole model request: run it from a timer, outside the press's dispatch.
     const compact = async () => {
+      if (isTurnRunning) {
+        $.ui.toast('Can’t compact while a turn is running')
+        return
+      }
       if (await read($, isCompacting)) return
       await update($, isCompacting, () => true)
-      try {
-        const result = await $.session.compact()
-        if ('skip' in result) $.ui.toast(`Compact skipped: ${result.skip}`)
-        await refresh($)
-      } catch {
-        $.ui.toast('Can’t compact while a turn is running')
-      } finally {
-        await update($, isCompacting, () => false)
-      }
+      $.clock.after(0, () => {
+        void (async () => {
+          try {
+            const result = await $.session.compact()
+            if (result.skip !== undefined) $.ui.toast(`Compact skipped: ${result.skip}`)
+            await refresh($)
+          } catch (error) {
+            $.ui.toast(`Compact failed: ${error instanceof Error ? error.message : String(error)}`)
+          } finally {
+            await update($, isCompacting, () => false)
+          }
+        })()
+      })
     }
 
     return (
