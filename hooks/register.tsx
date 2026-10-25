@@ -87,6 +87,25 @@ function kTokens(tokens: number): string {
   return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens)
 }
 
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+// A headless session (the desktop app, the SDK) has no $.session.compact yet: there compaction
+// runs only as the /compact command, so fall back to running that.
+async function compactSession($: EngineInterface): Promise<{ skip?: string }> {
+  try {
+    return await $.session.compact()
+  } catch (direct) {
+    try {
+      await $.command.run({ command: 'compact' })
+      return {}
+    } catch (command) {
+      throw new Error(`${messageOf(direct)}; /compact: ${messageOf(command)}`)
+    }
+  }
+}
+
 async function refresh($: EngineInterface) {
   const { context, rateLimits } = await $.session.usage()
   await update($, usage, () => toUsage(context, rateLimits))
@@ -207,11 +226,11 @@ export const register: Register = (on, options) => {
       $.clock.after(0, () => {
         void (async () => {
           try {
-            const result = await $.session.compact()
+            const result = await compactSession($)
             if (result.skip !== undefined) $.ui.toast(`Compact skipped: ${result.skip}`)
             await refresh($)
           } catch (error) {
-            $.ui.toast(`Compact failed: ${error instanceof Error ? error.message : String(error)}`)
+            $.ui.toast(`Compact failed: ${messageOf(error)}`)
           } finally {
             await update($, isCompacting, () => false)
           }

@@ -81,3 +81,30 @@ test('pressing Compact during a turn does not compact', async ($, on) => {
   expect(compactions).toBe(0)
   await ui.unmount()
 })
+
+test('in a headless session Compact runs the /compact command instead', async ($, on) => {
+  const clock = mock.clock(on)
+  const commands: string[] = []
+  on('session.usage', () => USAGE)
+  on('session.compact', () => {
+    throw new Error('$.session.compact: not available in a headless (-p / SDK) session yet')
+  })
+  on('command.run', (_, e) => {
+    commands.push(e.command)
+    return { text: '' }
+  })
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(String(e.text))
+    return { value: undefined }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'compact' })
+  await clock.settle()
+  expect(commands).toEqual(['compact'])
+  expect(toasts).toEqual([])
+  await ui.unmount()
+})
