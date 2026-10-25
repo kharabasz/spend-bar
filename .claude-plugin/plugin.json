@@ -1,0 +1,16 @@
+{
+  "name": "spend-bar",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "A bar above the prompt with session/weekly limits, prompt-cache status, context usage and a compact button",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt cache TTL",
+      "description": "How long the prompt cache lives after the last response (1h on subscriptions, 5m on most API keys)",
+      "default": "1h",
+      "options": ["1h", "5m"]
+    }
+  }
+}
