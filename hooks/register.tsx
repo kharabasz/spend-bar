@@ -15,8 +15,10 @@ type Level = 'ok' | 'warn' | 'alert'
 
 const BACKGROUND: Record<Exclude<Level, 'ok'>, Color> = { warn: 'warning', alert: 'error' }
 
-// An SVG is drawn as an image, outside the theme, so its colours are fixed.
-const PILL_FILL: Record<Exclude<Level, 'ok'>, { fill: string; ink: string }> = {
+// An SVG is drawn as an image, outside the theme, so its colours are fixed. Every item on a
+// surface that draws SVG is one, plain ones unfilled, so all share one height and baseline.
+const PILL_FILL: Record<Level, { fill: string; ink: string }> = {
+  ok: { fill: 'none', ink: '#8E8E93' },
   warn: { fill: '#F5A524', ink: '#2B1A00' },
   alert: { fill: '#E5484D', ink: '#FFFFFF' },
 }
@@ -31,15 +33,16 @@ function escapeXml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-function pillSvg(text: string, level: Exclude<Level, 'ok'>) {
+function pillSvg(text: string, level: Level) {
   const { fill, ink } = PILL_FILL[level]
+  const weight = level === 'ok' ? 400 : 600
   const width = Math.ceil(text.length * PILL_CHAR_WIDTH + PILL_PADDING * 2)
   const height = PILL_HEIGHT
   const source =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
     `<rect width="${width}" height="${height}" rx="${height / 2}" fill="${fill}"/>` +
     `<text x="${width / 2}" y="${height / 2}" fill="${ink}" font-family="ui-monospace, Consolas, Menlo, monospace" ` +
-    `font-size="${PILL_FONT}" font-weight="600" text-anchor="middle" dominant-baseline="central">${escapeXml(text)}</text>` +
+    `font-size="${PILL_FONT}" font-weight="${weight}" text-anchor="middle" dominant-baseline="central">${escapeXml(text)}</text>` +
     `</svg>`
 
   return { width, height, source }
@@ -136,19 +139,19 @@ export const register: Register = (on, options) => {
     const at = (await read($, now)) || Date.now()
     const compacting = await read($, isCompacting)
 
-    // Under threshold: plain text. Past it: a pill, a rounded SVG where the surface draws one, else coloured text.
+    // Under threshold: plain. Past it: a pill. Where the surface draws SVG both are one; else text.
     const pill = (key: string, level: Level, text: string) => {
+      if (e.surface !== 'terminal') {
+        const { Svg } = $.ui.resolve(e)
+        const { width, height, source } = pillSvg(text, level)
+        return <Svg key={key} source={source} alt={text} width={width} height={height} />
+      }
       if (level === 'ok') {
         return (
           <Text key={key} dimColor>
             {text}
           </Text>
         )
-      }
-      if (e.surface !== 'terminal') {
-        const { Svg } = $.ui.resolve(e)
-        const { width, height, source } = pillSvg(text, level)
-        return <Svg key={key} source={source} alt={text} width={width} height={height} />
       }
       return (
         <Text key={key} backgroundColor={BACKGROUND[level]} color="inverseText" bold>
