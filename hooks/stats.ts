@@ -1,5 +1,5 @@
 import { atom, read } from 'claude-code'
-import type { EngineInterface, Register, TurnUsage } from 'claude-code'
+import type { EngineInterface, Register, SessionCompactInput, SessionCompactResult, TurnUsage } from 'claude-code'
 
 const lastResponseAt = atom({ plugin: 'spend-bar', key: 'lastResponseAt' } as const, null)
 
@@ -296,6 +296,21 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
   )
 }
 
+export async function statsCompacted($: EngineInterface, e: SessionCompactInput, result: SessionCompactResult) {
+  if (!isEnabled) return
+  record(
+    {
+      t: await $.clock.now(),
+      kind: 'compact',
+      trigger: e.trigger,
+      agent: e.agentId ?? null,
+      tokensBefore: 'tokensBefore' in result ? (result.tokensBefore ?? null) : null,
+      tokensAfter: 'tokensAfter' in result ? (result.tokensAfter ?? null) : null,
+    },
+    day => add(day, ['compactions'], e.trigger, 1),
+  )
+}
+
 export function hookStats(on: On) {
   on('tool.call', async ($, e, next) => {
     const result = await next(e)
@@ -317,24 +332,6 @@ export function hookStats(on: On) {
         if (isError) add(day, ['tools', e.tool], 'errors', 1)
         if (isRepeatRead) add(day, [], 'repeatedReads', 1)
       },
-    )
-
-    return result
-  })
-
-  on('session.compact', async ($, e, next) => {
-    const result = await next(e)
-    if (!isEnabled) return result
-    record(
-      {
-        t: await $.clock.now(),
-        kind: 'compact',
-        trigger: e.trigger,
-        agent: e.agentId ?? null,
-        tokensBefore: 'tokensBefore' in result ? (result.tokensBefore ?? null) : null,
-        tokensAfter: 'tokensAfter' in result ? (result.tokensAfter ?? null) : null,
-      },
-      day => add(day, ['compactions'], e.trigger, 1),
     )
 
     return result
@@ -364,13 +361,6 @@ export function hookStats(on: On) {
     }
 
     return next(e)
-  })
-
-  on('turn.complete', async ($, e, next) => {
-    const result = await next(e)
-    await flushStats($)
-
-    return result
   })
 
   on('session.end', async ($, e, next) => {

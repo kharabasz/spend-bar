@@ -2,7 +2,16 @@ import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, SessionContextUsage, SessionRateLimit } from 'claude-code'
 
 import type { Limit, Usage } from '../types'
-import { configureStats, hookStats, statsMeasured, statsSessionStarted, statsStepEnded, statsStepStarting } from './stats'
+import {
+  configureStats,
+  flushStats,
+  hookStats,
+  statsCompacted,
+  statsMeasured,
+  statsSessionStarted,
+  statsStepEnded,
+  statsStepStarting,
+} from './stats'
 
 const usage = atom({ plugin: 'spend-bar', key: 'usage' } as const, null)
 const lastResponseAt = atom({ plugin: 'spend-bar', key: 'lastResponseAt' } as const, null)
@@ -92,19 +101,10 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-// A headless session (the desktop app, the SDK) has no $.session.compact yet: there compaction
-// runs only as the /compact command, so fall back to running that.
-async function compactSession($: EngineInterface): Promise<{ skip?: string }> {
-  try {
-    return await $.session.compact()
-  } catch (direct) {
-    try {
-      await $.command.run({ command: 'compact' })
-      return {}
-    } catch (command) {
-      throw new Error(`${messageOf(direct)}; /compact: ${messageOf(command)}`)
-    }
-  }
+const MIN_COMPACT_PERCENT = 30
+
+function isCompactable(current: Usage | null): boolean {
+  return current?.contextPercent != null && current.contextPercent >= MIN_COMPACT_PERCENT
 }
 
 async function refresh($: EngineInterface) {
@@ -120,6 +120,33 @@ export const register: Register = (on, options) => {
   // Amber in the last fifth of the TTL: 12m of an hour, 1m of five minutes.
   const cacheWarnMs = ttlMs / 5
   let stopTicking: (() => void) | undefined
+  let isCompactRunning = false
+
+  on('session.compact', async ($, e, next) => {
+    const isMainCompaction = e.agentId === undefined && e.trigger !== 'precompute'
+    if (isMainCompaction) {
+      isCompactRunning = true
+      await update($, isCompacting, () => true)
+    }
+    try {
+      const result = await next(e)
+      await statsCompacted($, e, result)
+
+      return result
+    } finally {
+      if (isMainCompaction) {
+        isCompactRunning = false
+        await update($, isCompacting, () => false)
+      }
+    }
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    await flushStats($)
+
+    return result
+  })
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -221,26 +248,19 @@ export const register: Register = (on, options) => {
       pills.push(pill('context', 'ok', 'ctx —'))
     }
 
-    const isTurnRunning = e.props.isWorking
+    const canCompact = !compacting && isCompactable(current)
 
-    // Compacting is a whole model request: run it from a timer, outside the press's dispatch.
     const compact = async () => {
-      if (isTurnRunning) {
-        $.ui.toast('Can’t compact while a turn is running')
-        return
-      }
-      if (await read($, isCompacting)) return
+      if ((await read($, isCompacting)) || !isCompactable(await read($, usage))) return
       await update($, isCompacting, () => true)
       $.clock.after(0, () => {
         void (async () => {
           try {
-            const result = await compactSession($)
-            if (result.skip !== undefined) $.ui.toast(`Compact skipped: ${result.skip}`)
-            await refresh($)
+            await $.command.run({ command: 'compact' })
           } catch (error) {
             $.ui.toast(`Compact failed: ${messageOf(error)}`)
           } finally {
-            await update($, isCompacting, () => false)
+            if (!isCompactRunning) await update($, isCompacting, () => false)
           }
         })()
       })
@@ -253,6 +273,7 @@ export const register: Register = (on, options) => {
           key="compact"
           label={compacting ? 'Compacting…' : 'Compact'}
           hotkey="c"
+          dimColor={!canCompact}
           onPress={compact}
         />
       </Box>
