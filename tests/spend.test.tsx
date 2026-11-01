@@ -109,8 +109,8 @@ test('Compact turns amber from 40% context, on every surface', async ($, on) => 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
     const button = await ui.find({ type: 'Button', key: 'compact' })
-    expect(button?.props.label).toBe('Compact')
-    expect((await ui.find({ type: 'Text', text: 'Compact' }))?.props.color).toBe('warning')
+    expect(button?.props.label).toBe('c')
+    expect((await ui.find({ type: 'Text', text: /^c$/ }))?.props.color).toBe('warning')
     await ui.unmount()
   }
 })
@@ -121,7 +121,7 @@ test('Compact stays plain under the configured threshold', { options: { compactW
   await start($)
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: 'Compact' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^c$/ })).toBeUndefined()
   expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.dimColor).toBe(false)
   await ui.unmount()
 })
@@ -293,7 +293,7 @@ test('Optimize spend scores the session and the week, then asks Claude', async (
   expect(prompt).toContain('This session: 1 requests')
   expect(prompt).toContain('Past 7 days: 2 requests')
   expect(prompt).toContain('4 cache rewrites after the cache expired (500k tokens)')
-  expect((await ui.find({ type: 'Button', key: 'optimize' }))?.props.label).toBe('Optimize spend')
+  expect((await ui.find({ type: 'Button', key: 'optimize' }))?.props.label).toBe('o')
   await ui.unmount()
 })
 

@@ -331,15 +331,15 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
         {pills}
         {shouldCompact ? (
-          <Button key="compact" label="Compact" hotkey="c" dimColor={false} onPress={compact}>
+          <Button key="compact" label="c" hotkey="c" dimColor={false} onPress={compact}>
             <Text color="warning" bold>
-              Compact
+              c
             </Text>
           </Button>
         ) : (
-          <Button key="compact" label={compacting ? 'Compacting…' : 'Compact'} hotkey="c" dimColor={!canCompact} onPress={compact} />
+          <Button key="compact" label={compacting ? 'c…' : 'c'} hotkey="c" dimColor={!canCompact} onPress={compact} />
         )}
-        <Button key="optimize" label={optimizing ? 'Reviewing spend…' : 'Optimize spend'} hotkey="o" dimColor={optimizing} onPress={optimize} />
+        <Button key="optimize" label={optimizing ? 'o…' : 'o'} hotkey="o" dimColor={optimizing} onPress={optimize} />
       </Box>
     )
   })
