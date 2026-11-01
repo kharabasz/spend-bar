@@ -1,8 +1,8 @@
 {
   "name": "spend-bar",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "license": "MIT",
-  "description": "A bar above the prompt with session/weekly limits, prompt-cache status, context usage and a compact button",
+  "description": "A bar above the prompt with session/weekly limits, prompt-cache status, context usage, compact and spend-review buttons, and trimming of long shell output",
   "types": "./types/index.d.ts",
   "userConfig": {
     "cacheTtl": {
@@ -26,6 +26,28 @@
       "title": "Stats folder",
       "description": "Where the event log is written; empty uses %LOCALAPPDATA%\\claude-building-blocks\\spend-bar\\events",
       "default": ""
+    },
+    "compactWarnPercent": {
+      "type": "number",
+      "title": "Compact warning (% context)",
+      "description": "The Compact button turns amber from this share of the context window; 0 turns it off",
+      "default": 40,
+      "min": 0,
+      "max": 100
+    },
+    "turnRequestWarning": {
+      "type": "number",
+      "title": "Long turn warning (requests)",
+      "description": "Show a toast when one main-thread turn reaches this many model requests; 0 turns it off",
+      "default": 40,
+      "min": 0
+    },
+    "trimLimit": {
+      "type": "number",
+      "title": "Trim tool output over (characters)",
+      "description": "Bash, PowerShell and browser_batch results longer than this are cut to their head and tail, the full text saved to a file the note names; 0 turns trimming off",
+      "default": 10000,
+      "min": 0
     }
   }
 }

@@ -1,11 +1,15 @@
 import { atom, read } from 'claude-code'
-import type { EngineInterface, Register, SessionCompactInput, SessionCompactResult, TurnUsage } from 'claude-code'
+import type { EngineInterface, Register, SessionCompactInput, SessionCompactResult, ToolCallResult, TurnUsage } from 'claude-code'
+
+import { trimToolResult } from './trim'
 
 const lastResponseAt = atom({ plugin: 'spend-bar', key: 'lastResponseAt' } as const, null)
 
 const MINUTE = 60_000
 const DAY = 24 * 60 * MINUTE
 const RETENTION_DAYS = 30
+const OUTPUT_RETENTION_DAYS = 7
+const ERROR_TEXT_LENGTH = 100
 const FILE_LIMIT_BYTES = 3 * 1024 * 1024
 const DAY_KEY_PREFIX = 'day:'
 
@@ -14,9 +18,9 @@ type Options = Parameters<Register>[1]
 
 type Counts = { [key: string]: number | Counts }
 
-type Line = { t: number; kind: string; [field: string]: unknown }
+export type Line = { t: number; kind: string; [field: string]: unknown }
 
-type Location = { dir: string; sep: string; isWindows: boolean }
+export type Location = { dir: string; sep: string; isWindows: boolean }
 
 type StepInput = { turnId: string; index: number; effort?: string | number; agentId?: string }
 
@@ -91,6 +95,32 @@ function sizeOf(value: unknown): number {
   } catch {
     return 0
   }
+}
+
+export function firstWord(command: string): string {
+  const segments = command
+    .split(/&&|\|\||;|\r?\n/)
+    .map(segment => segment.trim())
+    .filter(Boolean)
+  const main = segments.find(segment => !/^(cd|pushd|set-location|sl)\b/i.test(segment)) ?? segments[0] ?? ''
+  const bare = main.replace(/^(&\s*|\(\s*|\w+=\S*\s+|(sudo|env|time)\s+)+/i, '')
+  const match = /^(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(bare)
+  const word = match?.[1] ?? match?.[2] ?? match?.[3] ?? ''
+  const name = word.split(/[\\/]/).pop() ?? ''
+  return name.replace(/\.(exe|cmd|bat|ps1|sh)$/i, '').toLowerCase().slice(0, 40) || '?'
+}
+
+function shellCommandOf(input: { tool: string }): string | undefined {
+  if (input.tool !== 'Bash' && input.tool !== 'PowerShell') return undefined
+  const command = (input as { command?: unknown }).command
+  return typeof command === 'string' ? command : undefined
+}
+
+export function errorTextOf(result: ToolCallResult): string {
+  const value = result.result as { stderr?: unknown } | string | undefined
+  const stderr = typeof value === 'object' && value !== null && typeof value.stderr === 'string' ? value.stderr : ''
+  const text = stderr.trim() || (typeof result.text === 'string' ? result.text : typeof value === 'string' ? value : '')
+  return text.replace(/\s+/g, ' ').trim().slice(0, ERROR_TEXT_LENGTH)
 }
 
 function filePathOf(input: object): string | undefined {
@@ -188,6 +218,15 @@ export async function flushStats($: EngineInterface) {
   await flushing
 }
 
+async function pruneDays($: EngineInterface, place: Location, dir: string, cutoff: string) {
+  if (!(await $.fs.exists(dir))) return
+  for (const entry of await $.fs.list(dir)) {
+    if (entry.kind !== 'dir' || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name) || entry.name >= cutoff) continue
+    const folder = `${dir}${place.sep}${entry.name}`
+    await $.process.run(place.isWindows ? ['cmd', '/c', 'rmdir', '/s', '/q', folder] : ['rm', '-rf', folder])
+  }
+}
+
 async function prune($: EngineInterface, now: number) {
   const cutoff = dayOf(now - RETENTION_DAYS * DAY)
   for (const key of await $.store.keys()) {
@@ -196,12 +235,24 @@ async function prune($: EngineInterface, now: number) {
     }
   }
   const place = location
-  if (!place || !(await $.fs.exists(place.dir))) return
-  for (const entry of await $.fs.list(place.dir)) {
-    if (entry.kind !== 'dir' || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name) || entry.name >= cutoff) continue
-    const folder = `${place.dir}${place.sep}${entry.name}`
-    await $.process.run(place.isWindows ? ['cmd', '/c', 'rmdir', '/s', '/q', folder] : ['rm', '-rf', folder])
-  }
+  if (place) await pruneDays($, place, place.dir, cutoff)
+}
+
+async function pruneOutputs($: EngineInterface, now: number) {
+  const place = location
+  if (place) await pruneDays($, place, `${place.dir}${place.sep}output`, dayOf(now - OUTPUT_RETENTION_DAYS * DAY))
+}
+
+export function statsLocation(): Location | null {
+  return location
+}
+
+export function statsSessionId(): string {
+  return sessionId
+}
+
+export function isCollectingStats(): boolean {
+  return isEnabled
 }
 
 export function configureStats(options: Options) {
@@ -211,10 +262,15 @@ export function configureStats(options: Options) {
 }
 
 export async function statsSessionStarted($: EngineInterface, surface: string | null) {
-  if (!isEnabled) return
   try {
     location = await locate($)
     sessionId = await $.session.id()
+    await pruneOutputs($, await $.clock.now())
+  } catch (error) {
+    fail($, 'locating the stats folder', error)
+  }
+  if (!isEnabled) return
+  try {
     readPaths.clear()
     const now = await $.clock.now()
     const tools = await $.tool.list()
@@ -314,8 +370,11 @@ export async function statsCompacted($: EngineInterface, e: SessionCompactInput,
 export function hookStats(on: On) {
   on('tool.call', async ($, e, next) => {
     const result = await next(e)
-    if (!isEnabled) return result
     const at = await $.clock.now()
+    const place = location
+    const folder = place ? { dir: `${place.dir}${place.sep}output${place.sep}${dayOf(at)}`, sep: place.sep } : null
+    const answer = await trimToolResult($, e.tool, e.tool_use_id ?? `call-${at}`, result, folder)
+    if (!isEnabled) return answer
     const path = filePathOf(e)
     const pathHash = path === undefined ? undefined : hashPath(path)
     const isRead = e.tool === 'Read' && pathHash !== undefined
@@ -324,17 +383,42 @@ export function hookStats(on: On) {
     const isDenied = typeof result.deny === 'string'
     const bytes = isDenied ? 0 : sizeOf(result.result)
     const isError = result.isError === true
+    const shell = shellCommandOf(e)
+    const cmd = shell === undefined ? null : firstWord(shell)
+    const err = cmd !== null && isError ? errorTextOf(result) : null
+    const sentBytes = answer === result ? bytes : sizeOf(answer.result)
+    const isTrimmed = sentBytes !== bytes
     record(
-      { t: at, kind: 'tool', tool: e.tool, agent: e.agentId ?? null, bytes, isError, isDenied, path: pathHash ?? null },
+      {
+        t: at,
+        kind: 'tool',
+        tool: e.tool,
+        agent: e.agentId ?? null,
+        bytes,
+        ...(isTrimmed ? { sentBytes } : {}),
+        isError,
+        isDenied,
+        path: pathHash ?? null,
+        ...(cmd !== null ? { cmd } : {}),
+        ...(err !== null ? { err } : {}),
+      },
       day => {
         add(day, ['tools', e.tool], 'calls', 1)
         add(day, ['tools', e.tool], 'bytes', bytes)
         if (isError) add(day, ['tools', e.tool], 'errors', 1)
         if (isRepeatRead) add(day, [], 'repeatedReads', 1)
+        if (isTrimmed) {
+          add(day, ['trimmed'], 'calls', 1)
+          add(day, ['trimmed'], 'bytesSaved', bytes - sentBytes)
+        }
+        if (cmd !== null) {
+          add(day, ['commands', cmd], 'calls', 1)
+          if (isError) add(day, ['commands', cmd], 'errors', 1)
+        }
       },
     )
 
-    return result
+    return answer
   })
 
   on('agent.spawn', async ($, e, next) => {

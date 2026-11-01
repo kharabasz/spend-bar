@@ -12,11 +12,14 @@ import {
   statsStepEnded,
   statsStepStarting,
 } from './stats'
+import { spendReviewPrompt } from './optimize'
+import { configureTrim } from './trim'
 
 const usage = atom({ plugin: 'spend-bar', key: 'usage' } as const, null)
 const lastResponseAt = atom({ plugin: 'spend-bar', key: 'lastResponseAt' } as const, null)
 const now = atom({ plugin: 'spend-bar', key: 'now' } as const, 0)
 const isCompacting = atom({ plugin: 'spend-bar', key: 'isCompacting' } as const, false)
+const isOptimizing = atom({ plugin: 'spend-bar', key: 'isOptimizing' } as const, false)
 
 const MINUTE = 60_000
 const TICK_MS = 15_000
@@ -112,9 +115,50 @@ async function refresh($: EngineInterface) {
   await update($, usage, () => toUsage(context, rateLimits))
 }
 
+function thresholdOf(value: unknown, fallback: number): number {
+  const parsed = Number(value ?? fallback)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+}
+
+let turnId = ''
+let turnRequests = 0
+
+function countMainRequest(id: string): number {
+  if (id !== turnId) {
+    turnId = id
+    turnRequests = 0
+  }
+  turnRequests++
+  return turnRequests
+}
+
+async function optimizeSpend($: EngineInterface) {
+  let prompt: string | null = null
+  try {
+    prompt = await spendReviewPrompt($)
+  } catch (error) {
+    $.ui.toast(`Spend review failed: ${messageOf(error)}`)
+  } finally {
+    await update($, isOptimizing, () => false)
+  }
+  if (prompt === null) {
+    $.ui.toast('Turn on "Collect usage stats" in spend-bar\'s options to review spend')
+    return
+  }
+  try {
+    await $.prompt.submit({ text: prompt })
+  } catch (error) {
+    $.ui.toast(`Spend review failed: ${messageOf(error)}`)
+  }
+}
+
 export const register: Register = (on, options) => {
   configureStats(options)
+  configureTrim(options)
   hookStats(on)
+
+  const compactWarnPercent = thresholdOf(options.compactWarnPercent, 40)
+  const turnRequestWarning = thresholdOf(options.turnRequestWarning, 40)
 
   const ttlMs = options.cacheTtl === '5m' ? 5 * MINUTE : 60 * MINUTE
   // Amber in the last fifth of the TTL: 12m of an hour, 1m of five minutes.
@@ -174,6 +218,12 @@ export const register: Register = (on, options) => {
     const result = yield* next(e)
     statsStepEnded(e, result, started)
     if (e.agentId === undefined) {
+      const requests = countMainRequest(e.turnId)
+      if (turnRequestWarning > 0 && requests === turnRequestWarning) {
+        $.ui.toast(
+          `This turn has made ${requests} model requests, each resending the whole context. Consider stopping it, compacting, or splitting the work.`,
+        )
+      }
       const at = await $.clock.now()
       await update($, lastResponseAt, () => at)
       await update($, now, () => at)
@@ -249,6 +299,17 @@ export const register: Register = (on, options) => {
     }
 
     const canCompact = !compacting && isCompactable(current)
+    const shouldCompact =
+      canCompact && compactWarnPercent > 0 && current?.contextPercent != null && current.contextPercent >= compactWarnPercent
+    const optimizing = await read($, isOptimizing)
+
+    const optimize = async () => {
+      if (await read($, isOptimizing)) return
+      await update($, isOptimizing, () => true)
+      $.clock.after(0, () => {
+        void optimizeSpend($)
+      })
+    }
 
     const compact = async () => {
       if ((await read($, isCompacting)) || !isCompactable(await read($, usage))) return
@@ -269,13 +330,16 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
         {pills}
-        <Button
-          key="compact"
-          label={compacting ? 'Compacting…' : 'Compact'}
-          hotkey="c"
-          dimColor={!canCompact}
-          onPress={compact}
-        />
+        {shouldCompact ? (
+          <Button key="compact" label="Compact" hotkey="c" dimColor={false} onPress={compact}>
+            <Text color="warning" bold>
+              Compact
+            </Text>
+          </Button>
+        ) : (
+          <Button key="compact" label={compacting ? 'Compacting…' : 'Compact'} hotkey="c" dimColor={!canCompact} onPress={compact} />
+        )}
+        <Button key="optimize" label={optimizing ? 'Reviewing spend…' : 'Optimize spend'} hotkey="o" dimColor={optimizing} onPress={optimize} />
       </Box>
     )
   })

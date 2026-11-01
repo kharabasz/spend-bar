@@ -15,6 +15,7 @@ declare module 'claude-code' {
       lastResponseAt: number | null
       now: number
       isCompacting: boolean
+      isOptimizing: boolean
     }
   }
 }
