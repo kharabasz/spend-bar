@@ -71,7 +71,7 @@ test('pressing Compact runs /compact and shows Compacting… until it ends', asy
   expect(commands).toEqual(['compact'])
 
   const button = await ui.find({ type: 'Button', key: 'compact' })
-  expect(button?.props.label).toBe('c…')
+  expect(button?.props.label).toBe('↓…')
   expect(button?.props.dimColor).toBe(true)
 
   await ui.press({ key: 'compact' })
@@ -81,7 +81,7 @@ test('pressing Compact runs /compact and shows Compacting… until it ends', asy
   release()
   await clock.settle()
   await new Promise(resolve => setTimeout(resolve, 0))
-  expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.label).toBe('c')
+  expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.label).toBe('↓')
   expect(toasts).toEqual([])
   await ui.unmount()
 })
@@ -99,7 +99,7 @@ test('Compact is dimmed and does nothing below 30% context', async ($, on) => {
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const button = await ui.find({ type: 'Button', key: 'compact' })
-  expect(button?.props.label).toBe('c')
+  expect(button?.props.label).toBe('↓')
   expect(button?.props.dimColor).toBe(true)
   await ui.press({ key: 'compact' })
   await clock.settle()
@@ -123,9 +123,9 @@ test('an automatic compaction also shows Compacting…', async ($, on) => {
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const compaction = $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'hi', toolUses: [] }] })
   await new Promise(resolve => setTimeout(resolve, 0))
-  expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.label).toBe('c…')
+  expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.label).toBe('↓…')
   release()
   await compaction
-  expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.label).toBe('c')
+  expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.label).toBe('↓')
   await ui.unmount()
 })

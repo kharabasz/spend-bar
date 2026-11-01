@@ -1,6 +1,6 @@
 {
   "name": "spend-bar",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "license": "MIT",
   "description": "A bar above the prompt with session/weekly limits, prompt-cache status, context usage, compact and spend-review buttons, and trimming of long shell output",
   "types": "./types/index.d.ts",
