@@ -1,6 +1,7 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface, Register, SessionCompactInput, SessionCompactResult, ToolCallResult, TurnUsage } from 'claude-code'
 
+import { costOf } from './pricing'
 import { trimToolResult } from './trim'
 
 const lastResponseAt = atom({ plugin: 'spend-bar', key: 'lastResponseAt' } as const, null)
@@ -36,6 +37,7 @@ let sessionId = 'unknown'
 let lines: Line[] = []
 let rollups: Record<string, Counts> = {}
 let contextPercent: number | null = null
+let billedUsd: number | null = null
 let flushing: Promise<void> = Promise.resolve()
 let hasLoggedFailure = false
 const readPaths = new Set<string>()
@@ -153,7 +155,9 @@ async function locate($: EngineInterface): Promise<Location | null> {
   }
   const stateHome = await $.env.get('XDG_STATE_HOME')
   const home = await $.env.get('HOME')
-  const base = stateHome || (home ? `${home}/.local/state` : undefined)
+  // macOS keeps app data in ~/Library/Application Support; its homes, and only its, are under /Users.
+  const isMac = !stateHome && home !== undefined && home.startsWith('/Users/')
+  const base = stateHome || (home ? (isMac ? `${home}/Library/Application Support` : `${home}/.local/state`) : undefined)
   return base ? { dir: `${base}/claude-toolkit/spend-bar/events`, sep: '/', isWindows: false } : null
 }
 
@@ -272,6 +276,8 @@ export async function statsSessionStarted($: EngineInterface, surface: string | 
   if (!isEnabled) return
   try {
     readPaths.clear()
+    // The baseline: a resumed session has cost this much already, none of it this session's growth.
+    billedUsd = (await $.session.usage()).cost?.usd ?? null
     const now = await $.clock.now()
     const tools = await $.tool.list()
     const mcpTools = tools.filter(t => t.mcp)
@@ -298,8 +304,8 @@ export function statsMeasured(percent: number | null) {
   contextPercent = percent
 }
 
+// Read even with stats off: the idle-rewrite alert needs the gap too.
 export async function statsStepStarting($: EngineInterface, e: StepInput): Promise<StepStart> {
-  if (!isEnabled) return { previous: null, startedAt: 0 }
   return {
     previous: e.agentId === undefined ? await read($, lastResponseAt) : null,
     startedAt: await $.clock.now(),
@@ -313,6 +319,8 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
   const gapMs = previous === null ? null : startedAt - previous
   const isIdleRewrite = gapMs !== null && gapMs > ttlMs && usage.cache_creation_input_tokens > 0
   const ctx = isMain ? contextPercent : null
+  // Main-thread writes at the configured TTL; subagents write at the 5-minute rate.
+  const usd = costOf(usage, isMain && ttlMs > 5 * MINUTE)
   record(
     {
       t: startedAt,
@@ -326,6 +334,7 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
       out: usage.output_tokens,
       cacheRead: usage.cache_read_input_tokens,
       cacheWrite: usage.cache_creation_input_tokens,
+      usd: usd === null ? null : Math.round(usd * 1_000_000) / 1_000_000,
       gapMs,
       ctx,
       tools: result.toolUses.map(use => use.name),
@@ -337,11 +346,17 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
       add(day, model, 'output', usage.output_tokens)
       add(day, model, 'cacheRead', usage.cache_read_input_tokens)
       add(day, model, 'cacheWrite', usage.cache_creation_input_tokens)
+      if (usd !== null) {
+        add(day, model, 'usd', usd)
+        add(day, [], 'estimatedUsd', usd)
+        if (!isMain) add(day, [], 'subagentUsd', usd)
+      }
       if (!isMain) add(day, [], 'subagentRequests', 1)
       if (e.effort !== undefined) add(day, ['effort'], String(e.effort), 1)
       if (isIdleRewrite) {
         add(day, ['idleCacheRewrites'], 'count', 1)
         add(day, ['idleCacheRewrites'], 'tokens', usage.cache_creation_input_tokens)
+        if (usd !== null) add(day, ['idleCacheRewrites'], 'usd', usd)
       }
       if (ctx !== null) {
         add(day, ['context'], 'samples', 1)
@@ -350,6 +365,17 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
       }
     },
   )
+}
+
+// The engine's billed total (/cost) grows with each response; the day keeps what it grew by, so a
+// spend review can set the estimate beside what was billed.
+export async function statsCost($: EngineInterface, usd: number | undefined) {
+  if (!isEnabled || usd === undefined) return
+  const previous = billedUsd
+  billedUsd = usd
+  const delta = usd - (previous ?? 0)
+  if (delta <= 0) return
+  record({ t: await $.clock.now(), kind: 'cost', usd: Math.round(usd * 1_000_000) / 1_000_000 }, day => add(day, [], 'billedUsd', delta))
 }
 
 export async function statsCompacted($: EngineInterface, e: SessionCompactInput, result: SessionCompactResult) {

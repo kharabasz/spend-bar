@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
 
 const BAND = {
   plugin: 'spend-bar',
@@ -128,4 +129,135 @@ test('an automatic compaction also shows Compacting…', async ($, on) => {
   await compaction
   expect((await ui.find({ type: 'Button', key: 'compact' }))?.props.label).toBe('↓')
   await ui.unmount()
+})
+
+// An Enterprise seat on usage-based billing: no 5-hour or weekly windows, the month's extra usage
+// from the desktop app's get_usage tool, and the session's cost from the engine's ledger.
+const ENTERPRISE_USAGE = {
+  value: {
+    startedAt: 0,
+    context: { tokens: 40000, window: 1000000, percent: 4 },
+    rateLimits: [],
+    cost: { usd: 3.2 },
+  },
+}
+
+function getUsage(spent: string) {
+  const plan = {
+    status: 'ok',
+    plan: 'Enterprise',
+    windows: [],
+    extraUsage: { enabled: true, percentUsed: 0, spent, monthlyLimit: '1800.00', currency: 'USD' },
+  }
+  return { value: { content: [{ type: 'text', text: JSON.stringify({ plan }) }], isError: false } }
+}
+
+function toastsOf(on: Parameters<TestBody>[1]) {
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(String(e.text))
+    return { value: undefined }
+  })
+  on('ui.log', () => ({ value: undefined }))
+  return toasts
+}
+
+test('an Enterprise seat shows the month and the session cost instead of empty limits', async ($, on) => {
+  mock.clock(on)
+  on('session.usage', () => ENTERPRISE_USAGE)
+  on('mcp.call', (_, e) => (e.server === 'ccd_session_mgmt' && e.tool === 'get_usage' ? getUsage('7.02') : { value: { content: [], isError: true } }))
+  const toasts = toastsOf(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /month \$7\.02\/\$1800/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /session \$3\.20/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /limits —/ })).toBeFalsy()
+  expect(toasts).toEqual([])
+  await ui.unmount()
+})
+
+test('the month warns once at 75% and the pill turns amber', async ($, on) => {
+  mock.clock(on)
+  on('session.usage', () => ENTERPRISE_USAGE)
+  on('mcp.call', () => getUsage('1400.00'))
+  const toasts = toastsOf(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  expect(toasts).toEqual(["Extra usage is at 77.8% of this month's limit: $1400 of $1800."])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: / month \$1400\/\$1800 / }))?.props.backgroundColor).toBe('warning')
+  await ui.unmount()
+})
+
+test('without the desktop app the month is skipped and the bar still draws', async ($, on) => {
+  mock.clock(on)
+  let calls = 0
+  on('session.usage', () => ENTERPRISE_USAGE)
+  on('mcp.call', () => {
+    calls++
+    throw new Error('no server named ccd_session_mgmt')
+  })
+  on('turn.complete', () => ({ text: '' }))
+  toastsOf(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({ turnId: 't', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
+
+  expect(calls).toBe(1)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /session \$3\.20/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('the session cost warns at each multiple of the warning', { options: { sessionCostWarning: 10 } }, async ($, on) => {
+  mock.clock(on)
+  on('session.usage', () => ENTERPRISE_USAGE)
+  on('mcp.call', () => getUsage('7.02'))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  const toasts = toastsOf(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  for (const usd of [9, 10.5, 12, 21]) {
+    await $.session.measure({ context: ENTERPRISE_USAGE.value.context, rateLimits: [], cost: { usd }, changed: ['cost'] })
+  }
+  expect(toasts.map(t => t.split('.')[0])).toEqual(['This session has cost $10', 'This session has cost $21'])
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: / session \$21\.00 / }))?.props.backgroundColor).toBe('error')
+  await ui.unmount()
+})
+
+test('a large cache rewrite after the cache expired raises a toast with its cost', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  on('session.usage', () => ENTERPRISE_USAGE)
+  on('mcp.call', () => getUsage('7.02'))
+  const toasts = toastsOf(on)
+  let write = 0
+  on('turn.step', async function* (_, e) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'end_turn',
+      usage: { model: 'claude-opus-5-5', input_tokens: 1, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: write },
+    }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  write = 50_000
+  for await (const _ of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 1 })) {
+  }
+  await clock.advance(2 * 60 * 60_000)
+  write = 500_000
+  for await (const _ of $.turn.step({ turnId: 't2', index: 0, model: 'claude-opus-5-5', messageCount: 3 })) {
+  }
+
+  expect(toasts).toHaveLength(1)
+  expect(toasts[0]).toContain('idle 2h00m')
+  expect(toasts[0]).toContain('rewrote 500k tokens, about $4.00')
 })

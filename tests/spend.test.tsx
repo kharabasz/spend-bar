@@ -34,6 +34,11 @@ function usageAt(percent: number) {
 }
 
 function machine(on: Parameters<TestBody>[1], percent = 47) {
+  // The engine resolves C:\\... against the working directory off Windows: key files from the root.
+  const own = (path: string) => {
+    const at = path.indexOf(ROOT)
+    return at > 0 ? path.slice(at) : path
+  }
   const files = new Map<string, string>()
   const store = new Map<string, unknown>()
   const toasts: string[] = []
@@ -43,18 +48,19 @@ function machine(on: Parameters<TestBody>[1], percent = 47) {
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.usage', () => usageAt(percent))
   on('tool.list', () => ({ value: [] }))
-  on('fs.exists', (_, e) => ({ value: files.has(e.path) || [...files.keys()].some(k => k.startsWith(`${e.path}\\`)) }))
-  on('fs.stat', (_, e) => ({ value: { kind: 'file', size: files.get(e.path)?.length ?? 0, mtimeMs: 0, isLink: false } }))
-  on('fs.read', (_, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.exists', (_, e) => ({ value: files.has(own(e.path)) || [...files.keys()].some(k => k.startsWith(`${own(e.path)}\\`)) }))
+  on('fs.stat', (_, e) => ({ value: { kind: 'file', size: files.get(own(e.path))?.length ?? 0, mtimeMs: 0, isLink: false } }))
+  on('fs.read', (_, e) => ({ value: files.get(own(e.path)) ?? '' }))
   on('fs.write', (_, e) => {
-    files.set(e.path, e.text)
+    files.set(own(e.path), e.text)
     return { value: undefined }
   })
   on('fs.list', (_, e) => {
     const entries = new Map<string, 'file' | 'dir'>()
+    const dir = own(e.path)
     for (const key of files.keys()) {
-      if (!key.startsWith(`${e.path}\\`)) continue
-      const rest = key.slice(e.path.length + 1).split('\\')
+      if (!key.startsWith(`${dir}\\`)) continue
+      const rest = key.slice(dir.length + 1).split('\\')
       entries.set(rest[0]!, rest.length > 1 ? 'dir' : 'file')
     }
     return { value: [...entries].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
@@ -81,7 +87,7 @@ function machine(on: Parameters<TestBody>[1], percent = 47) {
   })
   on('turn.complete', () => ({ text: '' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  return { files, store, toasts, prompts }
+  return { files, store, toasts, prompts, own }
 }
 
 function stepAnswer(cacheWrite = 40) {
@@ -145,7 +151,7 @@ test('a toast appears once when one main-thread turn reaches the request warning
 
 test('long Bash output is cut to head and tail, the full text saved where the note says', async ($, on) => {
   mock.clock(on, { now: NOW })
-  const { files } = machine(on)
+  const { files, own } = machine(on)
   const stdout = `HEAD${'x'.repeat(30_000)}TAIL`
   on('tool.call', () => ({ result: { stdout, stderr: '', interrupted: false } }))
   await start($)
@@ -156,8 +162,8 @@ test('long Bash output is cut to head and tail, the full text saved where the no
   expect(result.stdout.startsWith('HEAD')).toBe(true)
   expect(result.stdout.endsWith('TAIL')).toBe(true)
   const path = /Full output: (\S+\.txt)/.exec(result.stdout)?.[1]
-  expect(path?.startsWith(`${EVENTS}\\output\\${TODAY}\\`)).toBe(true)
-  expect(files.get(path!)).toBe(stdout)
+  expect(own(path!).startsWith(`${EVENTS}\\output\\${TODAY}\\`)).toBe(true)
+  expect(files.get(own(path!))).toBe(stdout)
 })
 
 test('browser_batch text blocks are trimmed and other blocks kept', { options: { trimLimit: 1000 } }, async ($, on) => {
@@ -266,7 +272,7 @@ test('the score counts each spend pattern', () => {
   const prompt = buildPrompt(score, score, [{ idleCacheRewrites: { count: 2, tokens: 300_000 }, compactions: { manual: 1 } }])
   expect(prompt.startsWith('/')).toBe(false)
   expect(prompt).toContain('1 of 2 turns over 50 requests')
-  expect(prompt).toContain('2 cache rewrites after the cache expired (300k tokens)')
+  expect(prompt).toContain('2 cache rewrites after the cache expired (300k tokens')
 })
 
 test('Optimize spend scores the session and the week, then asks Claude', async ($, on) => {
@@ -291,8 +297,8 @@ test('Optimize spend scores the session and the week, then asks Claude', async (
   const [prompt] = prompts
   expect(prompt!.startsWith('/')).toBe(false)
   expect(prompt).toContain('This session: 1 requests')
-  expect(prompt).toContain('Past 7 days: 2 requests')
-  expect(prompt).toContain('4 cache rewrites after the cache expired (500k tokens)')
+  expect(prompt).toContain('Past 7 days: 2 requests costing about')
+  expect(prompt).toContain('4 cache rewrites after the cache expired (500k tokens')
   expect((await ui.find({ type: 'Button', key: 'optimize' }))?.props.label).toBe('$')
   await ui.unmount()
 })

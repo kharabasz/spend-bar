@@ -2,6 +2,7 @@ import type { EngineInterface } from 'claude-code'
 
 import { dayOf, flushStats, isCollectingStats, statsLocation, statsSessionId } from './stats'
 import type { Line } from './stats'
+import { dollars } from './pricing'
 
 const DAY = 24 * 60 * 60_000
 const WEEK_DAYS = 7
@@ -16,6 +17,8 @@ type Tally = Record<string, number>
 
 export type Score = {
   requests: number
+  usd: number
+  subagentUsd: number
   sentTokens: number
   outputTokens: number
   sentAtKnownContext: number
@@ -37,7 +40,9 @@ export type Score = {
 }
 
 export type DayTotals = {
-  idleCacheRewrites?: { count?: number; tokens?: number }
+  estimatedUsd?: number
+  billedUsd?: number
+  idleCacheRewrites?: { count?: number; tokens?: number; usd?: number }
   compactions?: Tally
   subagentRequests?: number
   models?: Record<string, { requests?: number }>
@@ -54,6 +59,8 @@ function bump(tally: Tally, key: string, amount = 1) {
 export function scoreLines(lines: readonly Line[]): Score {
   const score: Score = {
     requests: 0,
+    usd: 0,
+    subagentUsd: 0,
     sentTokens: 0,
     outputTokens: 0,
     sentAtKnownContext: 0,
@@ -80,6 +87,8 @@ export function scoreLines(lines: readonly Line[]): Score {
     if (line.kind === 'step') {
       const sent = numberOf(line.in) + numberOf(line.cacheRead) + numberOf(line.cacheWrite)
       score.requests++
+      score.usd += numberOf(line.usd)
+      if (line.agent != null) score.subagentUsd += numberOf(line.usd)
       score.sentTokens += sent
       score.outputTokens += numberOf(line.out)
       if (numberOf(line.cacheWrite) > BIG_REWRITE_TOKENS) {
@@ -148,7 +157,7 @@ export function describeScore(score: Score): string {
     .map(([tool, n]) => `${tool} ${n}`)
     .join(', ')
   return [
-    `${score.requests} requests, ${compact(score.sentTokens)} tokens sent, ${compact(score.outputTokens)} output`,
+    `${score.requests} requests costing about ${dollars(score.usd)} at list prices (${percent(score.subagentUsd, score.usd)} in subagents), ${compact(score.sentTokens)} tokens sent, ${compact(score.outputTokens)} output`,
     `${percent(score.sentAboveContext, score.sentAtKnownContext)} of main-thread tokens sent above ${HIGH_CONTEXT_PERCENT}% context`,
     `${score.longTurns} of ${score.turns} turns over ${LONG_TURN_REQUESTS} requests (${score.longTurnRequests} requests in them)`,
     `${(score.shellCalls / score.requests).toFixed(2)} shell calls per request`,
@@ -161,12 +170,16 @@ export function describeScore(score: Score): string {
 export function describeTotals(days: readonly DayTotals[]): string {
   let idle = 0
   let idleTokens = 0
+  let idleUsd = 0
+  let billed = 0
   let subagents = 0
   let requests = 0
   const compactions: Tally = {}
   for (const day of days) {
     idle += numberOf(day.idleCacheRewrites?.count)
     idleTokens += numberOf(day.idleCacheRewrites?.tokens)
+    idleUsd += numberOf(day.idleCacheRewrites?.usd)
+    billed += numberOf(day.billedUsd)
     subagents += numberOf(day.subagentRequests)
     for (const model of Object.values(day.models ?? {})) requests += numberOf(model.requests)
     for (const [trigger, n] of Object.entries(day.compactions ?? {})) bump(compactions, trigger, numberOf(n))
@@ -175,7 +188,8 @@ export function describeTotals(days: readonly DayTotals[]): string {
     .map(([trigger, n]) => `${trigger} ${n}`)
     .join(', ')
   return [
-    `${idle} cache rewrites after the cache expired (${compact(idleTokens)} tokens)`,
+    ...(billed > 0 ? [`${dollars(billed)} billed`] : []),
+    `${idle} cache rewrites after the cache expired (${compact(idleTokens)} tokens, about ${dollars(idleUsd)})`,
     `${percent(subagents, requests)} of requests from subagents`,
     `compactions: ${compacted || 'none'}`,
   ].join('; ')

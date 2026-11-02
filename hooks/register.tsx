@@ -2,11 +2,14 @@ import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, SessionContextUsage, SessionRateLimit } from 'claude-code'
 
 import type { Limit, Usage } from '../types'
+import { billingMeasured, configureBilling, refreshMonthly, startBilling } from './billing'
+import { costOf, dollars } from './pricing'
 import {
   configureStats,
   flushStats,
   hookStats,
   statsCompacted,
+  statsCost,
   statsMeasured,
   statsSessionStarted,
   statsStepEnded,
@@ -20,6 +23,8 @@ const lastResponseAt = atom({ plugin: 'spend-bar', key: 'lastResponseAt' } as co
 const now = atom({ plugin: 'spend-bar', key: 'now' } as const, 0)
 const isCompacting = atom({ plugin: 'spend-bar', key: 'isCompacting' } as const, false)
 const isOptimizing = atom({ plugin: 'spend-bar', key: 'isOptimizing' } as const, false)
+const monthly = atom({ plugin: 'spend-bar', key: 'monthly' } as const, null)
+const sessionUsd = atom({ plugin: 'spend-bar', key: 'sessionUsd' } as const, null)
 
 const MINUTE = 60_000
 const TICK_MS = 15_000
@@ -76,6 +81,7 @@ function toUsage(context: SessionContextUsage, limits: SessionRateLimit[]): Usag
   return {
     session: toLimit(limits, 'five_hour'),
     weekly: toLimit(limits, 'seven_day'),
+    spendLimit: toLimit(limits, 'spend_limit'),
     contextPercent: context.percent ?? null,
     contextTokens: context.tokens ?? null,
     contextWindow: context.window,
@@ -111,8 +117,9 @@ function isCompactable(current: Usage | null): boolean {
 }
 
 async function refresh($: EngineInterface) {
-  const { context, rateLimits } = await $.session.usage()
+  const { context, rateLimits, cost } = await $.session.usage()
   await update($, usage, () => toUsage(context, rateLimits))
+  await billingMeasured($, cost?.usd)
 }
 
 function thresholdOf(value: unknown, fallback: number): number {
@@ -154,11 +161,13 @@ async function optimizeSpend($: EngineInterface) {
 
 export const register: Register = (on, options) => {
   configureStats(options)
+  configureBilling(options)
   configureTrim(options)
   hookStats(on)
 
   const compactWarnPercent = thresholdOf(options.compactWarnPercent, 40)
   const turnRequestWarning = thresholdOf(options.turnRequestWarning, 40)
+  const idleRewriteWarning = thresholdOf(options.idleRewriteWarning, 100_000)
 
   const ttlMs = options.cacheTtl === '5m' ? 5 * MINUTE : 60 * MINUTE
   // Amber in the last fifth of the TTL: 12m of an hour, 1m of five minutes.
@@ -188,6 +197,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     await flushStats($)
+    await refreshMonthly($, true)
 
     return result
   })
@@ -202,6 +212,7 @@ export const register: Register = (on, options) => {
     })
     stopTicking = () => timer.cancel()
     await statsSessionStarted($, e.surface)
+    await startBilling($)
 
     return result
   })
@@ -209,6 +220,8 @@ export const register: Register = (on, options) => {
   on('session.measure', async ($, e, next) => {
     statsMeasured(e.context.percent ?? null)
     await update($, usage, () => toUsage(e.context, e.rateLimits))
+    await billingMeasured($, e.cost?.usd)
+    await statsCost($, e.cost?.usd)
 
     return next(e)
   })
@@ -218,6 +231,15 @@ export const register: Register = (on, options) => {
     const result = yield* next(e)
     statsStepEnded(e, result, started)
     if (e.agentId === undefined) {
+      const written = result.usage?.cache_creation_input_tokens ?? 0
+      const gapMs = started.previous === null ? null : started.startedAt - started.previous
+      if (idleRewriteWarning > 0 && gapMs !== null && gapMs > ttlMs && written >= idleRewriteWarning && result.usage) {
+        const usd = costOf(result.usage, ttlMs > 5 * MINUTE)
+        $.ui.toast(
+          `The prompt cache had expired (idle ${duration(gapMs)}), so this request rewrote ${kTokens(written)} tokens${usd === null ? '' : `, about ${dollars(usd)}`}. ` +
+            'For a session this large, a new session from a short handoff note is cheaper after a break.',
+        )
+      }
       const requests = countMainRequest(e.turnId)
       if (turnRequestWarning > 0 && requests === turnRequestWarning) {
         $.ui.toast(
@@ -242,6 +264,8 @@ export const register: Register = (on, options) => {
     const last = await read($, lastResponseAt)
     const at = (await read($, now)) || Date.now()
     const compacting = await read($, isCompacting)
+    const month = await read($, monthly)
+    const spent = await read($, sessionUsd)
 
     // Under threshold: plain. Past it: a pill. Where the surface draws SVG both are one; else text.
     const pill = (key: string, level: Level, text: string) => {
@@ -274,8 +298,21 @@ export const register: Register = (on, options) => {
       const { percent } = current.weekly
       pills.push(pill('weekly', levelOf(percent, 70, 90), `week ${Math.round(percent)}%${untilReset(current.weekly, at)}`))
     }
-    if (!current?.session && !current?.weekly) {
+    if (current?.spendLimit) {
+      const { percent } = current.spendLimit
+      pills.push(pill('spend', levelOf(percent, 75, 90), `spend ${Math.round(percent)}%${untilReset(current.spendLimit, at)}`))
+    }
+    // A usage-billed seat (Enterprise, Team) has no windows: its limit is the month's extra usage.
+    if (month) {
+      pills.push(pill('month', levelOf(month.percent, 75, 90), `month ${dollars(month.spent)}/${dollars(month.limit)}`))
+    }
+    if (!current?.session && !current?.weekly && !current?.spendLimit && !month && spent === null) {
       pills.push(pill('limits', 'ok', 'limits —'))
+    }
+    if (spent !== null) {
+      const warnAt = thresholdOf(options.sessionCostWarning, 25)
+      const level = warnAt > 0 ? levelOf(spent, warnAt - 0.005, warnAt * 2 - 0.005) : 'ok'
+      pills.push(pill('cost', level, `session ${dollars(spent)}`))
     }
 
     if (e.props.isWorking) {

@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
 
 const USAGE = {
   value: {
@@ -8,42 +9,70 @@ const USAGE = {
   },
 }
 
-const ROOT = 'C:\\Users\\me\\AppData\\Local'
-const EVENTS = `${ROOT}\\claude-toolkit\\spend-bar\\events`
+// Where each platform's event log lives, and the path separator it is written with.
+type Place = { env: Record<string, string>; root: string; events: string; sep: string }
+
+const WINDOWS: Place = {
+  env: { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' },
+  root: 'C:\\Users\\me',
+  events: 'C:\\Users\\me\\AppData\\Local\\claude-toolkit\\spend-bar\\events',
+  sep: '\\',
+}
+const MAC: Place = {
+  env: { HOME: '/Users/me' },
+  root: '/Users/me',
+  events: '/Users/me/Library/Application Support/claude-toolkit/spend-bar/events',
+  sep: '/',
+}
+const EVENTS = WINDOWS.events
 const NOW = new Date(2026, 9, 25, 12).getTime()
 const TODAY = '2026-10-25'
 
-function machine(on: Parameters<Parameters<typeof test>[1]>[1]) {
+function near(actual: unknown, expected: number) {
+  expect(typeof actual === 'number' && Math.abs(actual - expected) < 1e-9).toBe(true)
+}
+
+type UsageAnswer = { value: (typeof USAGE)['value'] & { cost?: { usd: number } } }
+
+function machine(on: Parameters<TestBody>[1], place: Place = WINDOWS, usage: UsageAnswer = USAGE) {
+  const { sep } = place
+  // The engine resolves a path that is not absolute on the host against the working directory, so
+  // C:\\... arrives under the cwd off Windows: key every file from the fixture's root.
+  const own = (path: string) => {
+    const at = path.indexOf(place.root)
+    return at > 0 ? path.slice(at) : path
+  }
   const files = new Map<string, string>()
   const store = new Map<string, unknown>()
   const removed: string[] = []
   const logs: string[] = []
-  on('env.get', (_, e) => ({ value: e.name === 'LOCALAPPDATA' ? ROOT : undefined }))
+  on('env.get', (_, e) => ({ value: place.env[e.name] }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
-  on('session.usage', () => USAGE)
+  on('session.usage', () => usage)
   on('tool.list', () => ({
     value: [
       { name: 'Read', description: '', mcp: false },
       { name: 'mcp__github__search', description: '', mcp: true },
     ],
   }))
-  on('fs.exists', (_, e) => ({ value: files.has(e.path) || [...files.keys()].some(k => k.startsWith(`${e.path}\\`)) }))
-  on('fs.stat', (_, e) => ({ value: { kind: 'file', size: files.get(e.path)?.length ?? 0, mtimeMs: 0, isLink: false } }))
-  on('fs.read', (_, e) => ({ value: files.get(e.path) ?? '' }))
+  on('fs.exists', (_, e) => ({ value: files.has(own(e.path)) || [...files.keys()].some(k => k.startsWith(`${own(e.path)}${sep}`)) }))
+  on('fs.stat', (_, e) => ({ value: { kind: 'file', size: files.get(own(e.path))?.length ?? 0, mtimeMs: 0, isLink: false } }))
+  on('fs.read', (_, e) => ({ value: files.get(own(e.path)) ?? '' }))
   on('fs.write', (_, e) => {
-    files.set(e.path, e.text)
+    files.set(own(e.path), e.text)
     return { value: undefined }
   })
   on('fs.list', (_, e) => {
-    const names = new Set([...files.keys()].filter(k => k.startsWith(`${e.path}\\`)).map(k => k.slice(e.path.length + 1).split('\\')[0]!))
+    const dir = own(e.path)
+    const names = new Set([...files.keys()].filter(k => k.startsWith(`${dir}${sep}`)).map(k => k.slice(dir.length + 1).split(sep)[0]!))
     return { value: [...names].map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) }
   })
   on('process.run', (_, e) => {
-    const folder = e.argv[e.argv.length - 1]!
-    removed.push(folder)
-    for (const key of [...files.keys()]) if (key.startsWith(`${folder}\\`)) files.delete(key)
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    const folder = own(e.argv[e.argv.length - 1]!)
+    removed.push(e.argv.join(' '))
+    for (const key of [...files.keys()]) if (key.startsWith(`${folder}${sep}`)) files.delete(key)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
   on('store.set', (_, e) => {
@@ -84,7 +113,7 @@ test('a turn is logged as JSONL lines and added to the day total', async ($, on)
   }
   await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\a.ts' })
   await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\a.ts' })
-  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'end_turn' })
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
   await clock.settle()
 
   const log = files.get(`${EVENTS}\\${TODAY}\\sess-1.jsonl`)
@@ -95,7 +124,12 @@ test('a turn is logged as JSONL lines and added to the day total', async ($, on)
 
   const totals = store.get(`day:${TODAY}`) as Record<string, any>
   expect(totals.sessions).toBe(1)
-  expect(totals.models['claude-opus-5-5']).toEqual({ requests: 1, input: 10, output: 20, cacheRead: 300, cacheWrite: 40 })
+  const { usd, ...tokens } = totals.models['claude-opus-5-5']
+  expect(tokens).toEqual({ requests: 1, input: 10, output: 20, cacheRead: 300, cacheWrite: 40 })
+  // Opus 5.5 at list prices, the cache write at the hour's rate: (10x4 + 20x20 + 300x0.2 + 40x8) / 1M.
+  near(usd, 0.00082)
+  near(totals.estimatedUsd, 0.00082)
+  near(JSON.parse(log!.trim().split('\n')[1]!).usd, 0.00082)
   expect(totals.tools.Read.calls).toBe(2)
   expect(totals.repeatedReads).toBe(1)
 })
@@ -109,7 +143,7 @@ test('day folders and totals older than 30 days are removed at session start', a
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
   expect(logs).toEqual([])
-  expect(removed).toEqual([`${EVENTS}\\2000-01-01`])
+  expect(removed).toEqual([`cmd /c rmdir /s /q ${EVENTS}\\2000-01-01`])
   expect(store.has('day:2000-01-01')).toBe(false)
 })
 
@@ -121,4 +155,48 @@ test('nothing is written when stats collection is off', { options: { collectStat
 
   expect(files.size).toBe(0)
   expect(store.size).toBe(0)
+})
+
+test('on macOS the log goes under Library/Application Support and old days are removed with rm', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, removed, logs } = machine(on, MAC)
+  files.set(`${MAC.events}/2000-01-01/old.jsonl`, '{}\n')
+  on('turn.step', async function* (_, e) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'end_turn',
+      usage: { model: 'claude-sonnet-5-5', input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }
+  })
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for await (const _ of $.turn.step({ turnId: 'turn-1', index: 0, model: 'claude-sonnet-5-5', messageCount: 1 })) {
+  }
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  expect(logs).toEqual([])
+  expect(removed).toEqual([`rm -rf ${MAC.events}/2000-01-01`])
+  const log = files.get(`${MAC.events}/${TODAY}/sess-1.jsonl`)
+  expect(log?.trim().split('\n').map(line => JSON.parse(line).kind)).toEqual(['session', 'step'])
+})
+
+test('the billed total is kept per day as it grows past the session start', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { store } = machine(on, MAC, { value: { ...USAGE.value, cost: { usd: 10 } } })
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (const usd of [12.5, 12.5, 14]) {
+    await $.session.measure({ context: USAGE.value.context, rateLimits: [], cost: { usd }, changed: ['cost'] })
+  }
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  near((store.get(`day:${TODAY}`) as Record<string, number>).billedUsd, 4)
 })
