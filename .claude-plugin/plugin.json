@@ -1,6 +1,6 @@
 {
   "name": "spend-bar",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "license": "MIT",
   "description": "A bar above the prompt with session/weekly limits, prompt-cache status, context usage, compact and spend-review buttons, and trimming of long shell output",
   "types": "./types/index.d.ts",
@@ -24,7 +24,7 @@
     "statsDir": {
       "type": "string",
       "title": "Stats folder",
-      "description": "Where the event log is written; empty uses %LOCALAPPDATA%\\claude-building-blocks\\spend-bar\\events",
+      "description": "Where the event log is written; empty uses %LOCALAPPDATA%\\claude-toolkit\\spend-bar\\events",
       "default": ""
     },
     "compactWarnPercent": {

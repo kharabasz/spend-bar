@@ -19,7 +19,7 @@ const BAND = {
 } as const
 
 const ROOT = 'C:\\Users\\me\\AppData\\Local'
-const EVENTS = `${ROOT}\\claude-building-blocks\\spend-bar\\events`
+const EVENTS = `${ROOT}\\claude-toolkit\\spend-bar\\events`
 const NOW = new Date(2026, 10, 2, 12).getTime()
 const TODAY = '2026-11-02'
 

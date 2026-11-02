@@ -149,12 +149,12 @@ async function locate($: EngineInterface): Promise<Location | null> {
     return { dir: configuredDir.replace(/[\\/]+$/, ''), sep: isWindows ? '\\' : '/', isWindows }
   }
   if (localAppData) {
-    return { dir: `${localAppData}\\claude-building-blocks\\spend-bar\\events`, sep: '\\', isWindows: true }
+    return { dir: `${localAppData}\\claude-toolkit\\spend-bar\\events`, sep: '\\', isWindows: true }
   }
   const stateHome = await $.env.get('XDG_STATE_HOME')
   const home = await $.env.get('HOME')
   const base = stateHome || (home ? `${home}/.local/state` : undefined)
-  return base ? { dir: `${base}/claude-building-blocks/spend-bar/events`, sep: '/', isWindows: false } : null
+  return base ? { dir: `${base}/claude-toolkit/spend-bar/events`, sep: '/', isWindows: false } : null
 }
 
 async function fileFor($: EngineInterface, place: Location, folder: string) {
