@@ -212,6 +212,29 @@ test('without the desktop app the month is skipped and the bar still draws', asy
   await ui.unmount()
 })
 
+test('in the desktop app a get_usage failure at session start is retried after the next turn', async ($, on) => {
+  mock.clock(on)
+  let calls = 0
+  on('session.usage', () => ENTERPRISE_USAGE)
+  on('mcp.call', (_, e) => {
+    calls++
+    // The app's own MCP servers can still be connecting when the session starts.
+    if (calls === 1) throw new Error('MCP server ccd_session_mgmt is still connecting')
+    return e.server === 'ccd_session_mgmt' && e.tool === 'get_usage' ? getUsage('721.33') : { value: { content: [], isError: true } }
+  })
+  on('turn.complete', () => ({ text: '' }))
+  toastsOf(on)
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.complete({ turnId: 't', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
+
+  expect(calls).toBe(2)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /month \$721\/\$1800/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /session \$3\.20/ })).toBeTruthy()
+  await ui.unmount()
+})
+
 test('the session cost warns at each multiple of the warning', { options: { sessionCostWarning: 10 } }, async ($, on) => {
   mock.clock(on)
   on('session.usage', () => ENTERPRISE_USAGE)

@@ -212,7 +212,7 @@ export const register: Register = (on, options) => {
     })
     stopTicking = () => timer.cancel()
     await statsSessionStarted($, e.surface)
-    await startBilling($)
+    await startBilling($, e.surface)
 
     return result
   })

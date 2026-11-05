@@ -22,6 +22,7 @@ const MONTH_WARN_PERCENTS = [75, 90]
 let sessionWarningUsd = 25
 let isRefreshing = false
 let hasMonthly = true
+let isDesktop = false
 let warnedSessionSteps = 0
 let warnedMonthPercent = 0
 let stopRefreshing: (() => void) | undefined
@@ -64,8 +65,10 @@ export async function refreshMonthly($: EngineInterface, ifStale = false) {
     await update($, monthly, () => value)
     if (value) await warnMonth($, value)
   } catch {
-    // No desktop app (a terminal session, -p, the SDK): the month is unknown, so stop asking.
-    hasMonthly = false
+    // In the desktop app the call can fail while the app's MCP servers are still connecting at
+    // session start, so the next turn asks again. Elsewhere (a terminal session, -p, the SDK) there
+    // is no get_usage tool: the month is unknown, so stop asking.
+    if (!isDesktop) hasMonthly = false
   } finally {
     isRefreshing = false
   }
@@ -78,8 +81,9 @@ async function warnMonth($: EngineInterface, value: Monthly) {
   $.ui.toast(`Extra usage is at ${value.percent}% of this month's limit: ${dollars(value.spent)} of ${dollars(value.limit)}.`)
 }
 
-export async function startBilling($: EngineInterface) {
+export async function startBilling($: EngineInterface, surface: string | null) {
   hasMonthly = true
+  isDesktop = surface === 'desktop'
   warnedSessionSteps = 0
   warnedMonthPercent = 0
   await refreshMonthly($)
