@@ -8,7 +8,7 @@ A bar above the prompt showing:
   - behind a gateway, its **spend limit** (`spend 40%`)
 - **Session cost**, as `/cost` totals it — amber from $25, red from $50
 - **Prompt cache status**, counted down from the last model response — amber in the last fifth of the TTL, red once expired
-- **Context usage** — amber above 40%, red above 60%
+- **Context usage**, as a percentage of the window — amber above 40%, red above 60%
 - A **↓** (Compact) button, hotkey `c` while the bar has focus, that runs `/compact` in the chat, as the session rail does. It reads **↓…** while any compaction runs (automatic ones too) and is dimmed and inactive below 30% context. It turns amber from 40% context, the point to compact by
 - A **$** (Optimize spend) button, hotkey `o`, that scores this session and the past week from the usage stats below and asks Claude for suggestions. It looks at the share of tokens sent above 40% context, turns over 50 requests, shell calls per request, repeated reads, tool results over 20k characters, cache rewrites over 100k tokens, the estimated and billed cost and the subagents' share of it, the most used shell commands and the most common shell errors
 

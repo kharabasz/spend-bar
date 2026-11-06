@@ -4,8 +4,6 @@ export type Usage = {
   session: Limit | null
   weekly: Limit | null
   contextPercent: number | null
-  contextTokens: number | null
-  contextWindow: number
   // A gateway's spend limit, percent used.
   spendLimit: Limit | null
 }

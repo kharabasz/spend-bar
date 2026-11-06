@@ -83,8 +83,6 @@ function toUsage(context: SessionContextUsage, limits: SessionRateLimit[]): Usag
     weekly: toLimit(limits, 'seven_day'),
     spendLimit: toLimit(limits, 'spend_limit'),
     contextPercent: context.percent ?? null,
-    contextTokens: context.tokens ?? null,
-    contextWindow: context.window,
   }
 }
 
@@ -370,8 +368,7 @@ export const register: Register = (on, options) => {
     }
 
     if (current?.contextPercent != null) {
-      const tokens = current.contextTokens != null ? ` ${kTokens(current.contextTokens)}/${kTokens(current.contextWindow)}` : ''
-      pills.push(pill('context', levelOf(current.contextPercent, 40, 60), `ctx ${current.contextPercent}%${tokens}`))
+      pills.push(pill('context', levelOf(current.contextPercent, 40, 60), `ctx ${current.contextPercent}%`))
     } else {
       pills.push(pill('context', 'ok', 'ctx —'))
     }

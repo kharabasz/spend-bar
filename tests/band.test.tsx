@@ -26,6 +26,21 @@ const USAGE = {
   },
 }
 
+test('the context pill shows the percent without the token counts', async ($, on) => {
+  mock.clock(on)
+  on('session.usage', () => ({
+    value: { startedAt: 0, context: { tokens: 94000, window: 200000, percent: 47 }, rateLimits: [] },
+  }))
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /ctx 47%/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /94k|200k/ })).toBeFalsy()
+  await ui.unmount()
+})
+
 test('the band draws its pills and the compact button, on every surface', async ($, on) => {
   mock.clock(on)
   on('session.usage', () => USAGE)
