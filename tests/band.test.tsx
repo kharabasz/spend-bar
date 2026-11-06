@@ -41,6 +41,29 @@ test('the context pill shows the percent without the token counts', async ($, on
   await ui.unmount()
 })
 
+for (const [percent, color] of [
+  [20, undefined],
+  [21, 'warning'],
+  [30, 'warning'],
+  [31, 'error'],
+] as const) {
+  test(`the context pill at ${percent}% has background ${color}`, async ($, on) => {
+    mock.clock(on)
+    on('session.usage', () => ({
+      value: { startedAt: 0, context: { tokens: 1000, window: 200000, percent }, rateLimits: [] },
+    }))
+    on('command.register', () => ({ value: undefined }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const pill = await ui.find({ type: 'Text', text: new RegExp(`ctx ${percent}%`) })
+    expect(pill).toBeTruthy()
+    expect(pill?.props.backgroundColor).toBe(color)
+    await ui.unmount()
+  })
+}
+
 test('the band draws its pills and the compact button, on every surface', async ($, on) => {
   mock.clock(on)
   on('session.usage', () => USAGE)

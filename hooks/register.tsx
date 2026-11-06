@@ -368,7 +368,7 @@ export const register: Register = (on, options) => {
     }
 
     if (current?.contextPercent != null) {
-      pills.push(pill('context', levelOf(current.contextPercent, 40, 60), `ctx ${current.contextPercent}%`))
+      pills.push(pill('context', levelOf(current.contextPercent, 20, 30), `ctx ${current.contextPercent}%`))
     } else {
       pills.push(pill('context', 'ok', 'ctx —'))
     }
