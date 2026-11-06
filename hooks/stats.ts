@@ -13,6 +13,10 @@ const OUTPUT_RETENTION_DAYS = 7
 const ERROR_TEXT_LENGTH = 100
 const FILE_LIMIT_BYTES = 3 * 1024 * 1024
 const DAY_KEY_PREFIX = 'day:'
+// The same skill can reach three hooks at once (skill.prompt, the Skill tool call, the slash command);
+// one run counts once. Likewise a compaction can reach session.compact and its boundary notice.
+const SAME_SKILL_RUN_MS = 5_000
+const SAME_COMPACTION_MS = 30_000
 
 type On = Parameters<Register>[0]
 type Options = Parameters<Register>[1]
@@ -41,6 +45,8 @@ let billedUsd: number | null = null
 let flushing: Promise<void> = Promise.resolve()
 let hasLoggedFailure = false
 const readPaths = new Set<string>()
+const skillSeenAt = new Map<string, number>()
+let compactRecordedAt: number | null = null
 
 function pad(n: number): string {
   return String(n).padStart(2, '0')
@@ -210,6 +216,7 @@ async function writeBatch($: EngineInterface, batch: Line[], batchRollups: Recor
 
 export async function flushStats($: EngineInterface) {
   if (!isEnabled) return
+  await drainCompactions($)
   const batch = lines
   const batchRollups = rollups
   lines = []
@@ -276,6 +283,8 @@ export async function statsSessionStarted($: EngineInterface, surface: string | 
   if (!isEnabled) return
   try {
     readPaths.clear()
+    skillSeenAt.clear()
+    compactRecordedAt = null
     // The baseline: a resumed session has cost this much already, none of it this session's growth.
     billedUsd = (await $.session.usage()).cost?.usd ?? null
     const now = await $.clock.now()
@@ -378,11 +387,24 @@ export async function statsCost($: EngineInterface, usd: number | undefined) {
   record({ t: await $.clock.now(), kind: 'cost', usd: Math.round(usd * 1_000_000) / 1_000_000 }, day => add(day, [], 'billedUsd', delta))
 }
 
+// Counts one skill run, from whichever hook sees it first. A plugin above this one (the built-in
+// security guard) passes skill.prompt over, so the Skill tool call and the slash command count too.
+async function statsSkill($: EngineInterface, skill: string, via: 'prompt' | 'tool' | 'command') {
+  if (!isEnabled) return
+  const t = await $.clock.now()
+  const seenAt = skillSeenAt.get(skill)
+  if (seenAt !== undefined && t - seenAt < SAME_SKILL_RUN_MS) return
+  skillSeenAt.set(skill, t)
+  record({ t, kind: 'skill', skill, via }, day => add(day, ['skills'], skill, 1))
+}
+
 export async function statsCompacted($: EngineInterface, e: SessionCompactInput, result: SessionCompactResult) {
   if (!isEnabled) return
+  const t = await $.clock.now()
+  compactRecordedAt = t
   record(
     {
-      t: await $.clock.now(),
+      t,
       kind: 'compact',
       trigger: e.trigger,
       agent: e.agentId ?? null,
@@ -391,6 +413,49 @@ export async function statsCompacted($: EngineInterface, e: SessionCompactInput,
     },
     day => add(day, ['compactions'], e.trigger, 1),
   )
+}
+
+// A plugin above this one (the built-in security guard) sends session.compact past it, but not the
+// PostCompact command hook in hooks.json: scripts/record-compact.sh leaves a line per compaction in
+// <events>/pending/<session>.jsonl, counted here and cleared. (Trigger only: no token counts.)
+async function drainCompactions($: EngineInterface) {
+  const place = location
+  if (!isEnabled || !place) return
+  const path = `${place.dir}${place.sep}pending${place.sep}${sessionId}.jsonl`
+  try {
+    if (!(await $.fs.exists(path))) return
+    const text = await $.fs.read(path)
+    if (!text.trim()) return
+    await $.fs.write(path, '')
+    for (const row of text.split('\n')) {
+      let parsed: { t?: unknown; trigger?: unknown; agent?: unknown }
+      try {
+        parsed = JSON.parse(row)
+      } catch {
+        continue
+      }
+      const t = typeof parsed.t === 'number' ? parsed.t : await $.clock.now()
+      // session.compact reached this plugin and counted it already.
+      if (compactRecordedAt !== null && Math.abs(t - compactRecordedAt) < SAME_COMPACTION_MS) continue
+      const trigger = parsed.trigger === 'manual' || parsed.trigger === 'auto' ? parsed.trigger : 'unknown'
+      const agent = typeof parsed.agent === 'string' ? parsed.agent : null
+      record({ t, kind: 'compact', trigger, agent, tokensBefore: null, tokensAfter: null, via: 'hook' }, day =>
+        add(day, ['compactions'], trigger, 1),
+      )
+    }
+  } catch (error) {
+    fail($, 'reading the compaction notes', error)
+  }
+}
+
+async function isCustomCommand($: EngineInterface, name: string): Promise<boolean> {
+  try {
+    const found = (await $.command.list()).find(command => command.name === name)
+    // Built-ins are not skills, and spend-bar's own /spend-review is not one either.
+    return found !== undefined && found.source !== 'builtin' && !(found.plugin === 'spend-bar')
+  } catch {
+    return false
+  }
 }
 
 export function hookStats(on: On) {
@@ -407,6 +472,8 @@ export function hookStats(on: On) {
     const isRepeatRead = isRead && readPaths.has(pathHash)
     if (isRead) readPaths.add(pathHash)
     const isDenied = typeof result.deny === 'string'
+    const skillName = e.tool === 'Skill' ? (e as { skill?: unknown }).skill : undefined
+    if (typeof skillName === 'string' && !isDenied) await statsSkill($, skillName, 'tool')
     const bytes = isDenied ? 0 : sizeOf(result.result)
     const isError = result.isError === true
     const shell = shellCommandOf(e)
@@ -466,9 +533,15 @@ export function hookStats(on: On) {
   })
 
   on('skill.prompt', async ($, e, next) => {
-    if (isEnabled) {
-      record({ t: await $.clock.now(), kind: 'skill', skill: e.skill }, day => add(day, ['skills'], e.skill, 1))
-    }
+    await statsSkill($, e.skill, 'prompt')
+
+    return next(e)
+  })
+
+  // Sees the slash commands skill.prompt would where a plugin above this one (the built-in security
+  // guard on Team and Enterprise seats) sends that event past it; the Skill tool call is seen above.
+  on('command.run', async ($, e, next) => {
+    if (isEnabled && (await isCustomCommand($, e.command))) await statsSkill($, e.command, 'command')
 
     return next(e)
   })

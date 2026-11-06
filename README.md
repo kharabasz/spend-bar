@@ -50,6 +50,8 @@ The bar also records how each session uses tokens, for a later spend review. It 
 - each shell call: the first word of the command (`git`, `gh`, `dotnet`, `npm`, ...) and, when it fails, the first 100 characters of its error text
 - compactions (trigger, size before and after), subagents spawned, skills run, and the tools and MCP servers loaded at session start
 
+On Team and Enterprise seats, and wherever managed settings are present, Claude Code's built-in security guard (`cc-plugin-sec-default`) sends the `skill.prompt` and `session.compact` events past installed plugins, which is the "its skill.prompt hook was skipped" notice at launch. The stats still count those runs: skills from the Skill tool call and from slash commands, and compactions from a `PostCompact` command hook (`scripts/record-compact.sh`). What the guard hides is a compaction's size before and after, so those show as empty there.
+
 Each session writes a JSONL file per day to `%LOCALAPPDATA%\claude-toolkit\spend-bar\events\<date>\<session>.jsonl` on Windows, `~/Library/Application Support/claude-toolkit/spend-bar/events/<date>/<session>.jsonl` on macOS, and under `$XDG_STATE_HOME` or `~/.local/state` elsewhere. Estimated costs come from the list prices in `hooks/pricing.ts`, with main-thread cache writes at the configured TTL's rate and subagents' at the 5-minute rate; update the table when prices change. Daily totals are kept in the plugin's store. Both are deleted after 30 days. Options: **Collect usage stats** (on by default) and **Stats folder**.
 
 Requires Claude Code 2.1.308 or newer.

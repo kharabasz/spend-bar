@@ -202,3 +202,69 @@ test('the billed total is kept per day as it grows past the session start', asyn
 
   near((store.get(`day:${TODAY}`) as Record<string, number>).billedUsd, 4)
 })
+
+const COMMANDS = {
+  value: [
+    { name: 'compact', description: '', source: 'builtin' },
+    { name: 'commit', description: '', source: 'user' },
+    { name: 'spend-review', description: '', source: 'plugin', plugin: 'spend-bar' },
+  ],
+}
+
+// The built-in security guard sends skill.prompt and session.compact past every installed plugin, so
+// these two tests never raise them: the Skill tool, the slash command and the PostCompact hook's note
+// (scripts/record-compact.sh) are all spend-bar sees.
+const PENDING = `${EVENTS}\\pending\\sess-1.jsonl`
+const NOTE = (trigger: string) => `{"t":${NOW},"trigger":"${trigger}","agent":null}\n`
+
+test('skills and compactions are still counted when skill.prompt and session.compact are passed over', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, store } = machine(on)
+  files.set(PENDING, NOTE('manual'))
+  on('command.list', () => COMMANDS)
+  on('tool.call', () => ({ result: { type: 'text', file: { content: 'ok' } } }))
+  on('command.run', () => ({ text: '' }))
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Skill', skill: 'ministack-devkit:ms-handoff' })
+  await $.command.run({ command: 'commit', args: '' })
+  await $.command.run({ command: 'compact', args: '' })
+  await $.command.run({ command: 'spend-review', args: '' })
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  const totals = store.get(`day:${TODAY}`) as Record<string, any>
+  expect(totals.skills).toEqual({ 'ministack-devkit:ms-handoff': 1, commit: 1 })
+  expect(totals.compactions).toEqual({ manual: 1 })
+  expect(files.get(PENDING)).toBe('')
+  const log = files.get(`${EVENTS}\\${TODAY}\\sess-1.jsonl`)!
+  const kinds = log.trim().split('\n').map(line => JSON.parse(line))
+  expect(kinds.filter(line => line.kind === 'skill').map(line => line.via)).toEqual(['tool', 'command'])
+  expect(kinds.filter(line => line.kind === 'compact').length).toBe(1)
+})
+
+test('one skill run or compaction seen by several hooks is counted once', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { store, files } = machine(on)
+  on('command.list', () => COMMANDS)
+  on('tool.call', () => ({ result: { type: 'text', file: { content: 'ok' } } }))
+  on('command.run', () => ({ text: '' }))
+  on('skill.prompt', (_, e) => ({ text: e.text }))
+  on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }], tokensBefore: 900, tokensAfter: 100 }))
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'commit', args: '' })
+  await $.skill.prompt({ skill: 'commit', text: 'x', frontmatter: {} } as never)
+  await $.tool.call({ tool: 'Skill', skill: 'commit' })
+  await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'hi', toolUses: [] }] })
+  // The PostCompact hook runs after the compaction, so its note arrives once session.compact was counted.
+  files.set(PENDING, NOTE('auto'))
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  const totals = store.get(`day:${TODAY}`) as Record<string, any>
+  expect(totals.skills).toEqual({ commit: 1 })
+  expect(totals.compactions).toEqual({ auto: 1 })
+})
