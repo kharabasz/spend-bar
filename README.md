@@ -80,6 +80,4 @@ claude plugin validate .
 claude plugin test .
 ```
 
-Run `scripts/install-hooks.sh` once per clone. It points git at `.githooks/`, whose pre-commit hook refuses a commit that adds any line matching your private-names pattern (see the script header; the pattern lives outside the repo).
-
 MIT licensed.

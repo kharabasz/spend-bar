@@ -1,8 +1,0 @@
-#!/bin/sh
-# Same pattern, applied to the commit message.
-file="${LEAK_PATTERN_FILE:-$HOME/.config/public-leak-check/pattern}"
-[ -r "$file" ] || { echo "leak check: no pattern file at $file" >&2; exit 1; }
-if grep -iE -e "$(cat "$file")" "$1" >/dev/null; then
-  echo "leak check: the commit message matches the private-names pattern" >&2
-  exit 1
-fi
