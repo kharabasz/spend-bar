@@ -39,8 +39,9 @@ function machine(on: Parameters<TestBody>[1], place: Place = WINDOWS, usage: Usa
   // The engine resolves a path that is not absolute on the host against the working directory, so
   // C:\\... arrives under the cwd off Windows: key every file from the fixture's root.
   const own = (path: string) => {
-    const at = path.indexOf(place.root)
-    return at > 0 ? path.slice(at) : path
+    const fixturePath = path.replace(/[\\/]/g, sep)
+    const at = fixturePath.indexOf(place.root)
+    return at > 0 ? fixturePath.slice(at) : fixturePath
   }
   const files = new Map<string, string>()
   const store = new Map<string, unknown>()
