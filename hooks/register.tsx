@@ -15,7 +15,7 @@ import {
   statsStepEnded,
   statsStepStarting,
 } from './stats'
-import { spendReviewPrompt } from './optimize'
+import { spendReviewPrompt, weeklyReviewPrompt } from './optimize'
 import { configureTrim } from './trim'
 
 const usage = atom({ plugin: 'spend-bar', key: 'usage' } as const, null)
@@ -139,10 +139,10 @@ function countMainRequest(id: string): number {
   return turnRequests
 }
 
-async function optimizeSpend($: EngineInterface) {
+async function optimizeSpend($: EngineInterface, weekly = false) {
   let prompt: string | null = null
   try {
-    prompt = await spendReviewPrompt($)
+    prompt = await (weekly ? weeklyReviewPrompt($) : spendReviewPrompt($))
   } catch (error) {
     $.ui.toast(`Spend review failed: ${messageOf(error)}`)
   } finally {
@@ -168,6 +168,10 @@ export const register: Register = (on, options) => {
   const compactWarnPercent = thresholdOf(options.compactWarnPercent, 40)
   const turnRequestWarning = thresholdOf(options.turnRequestWarning, 40)
   const idleRewriteWarning = thresholdOf(options.idleRewriteWarning, 100_000)
+  // Enforce options: both off (0) by default.
+  const contextGatePercent = thresholdOf(options.contextGatePercent, 0)
+  const turnRequestBrake = thresholdOf(options.turnRequestBrake, 0)
+  let lastGatedText: string | null = null
 
   const ttlMs = options.cacheTtl === '5m' ? 5 * MINUTE : 60 * MINUTE
   // Amber in the last fifth of the TTL: 12m of an hour, 1m of five minutes.
@@ -194,6 +198,35 @@ export const register: Register = (on, options) => {
     }
   })
 
+  on('command.run', { command: 'spend-review' }, async $ => {
+    $.clock.after(0, () => {
+      void optimizeSpend($, true)
+    })
+
+    return { text: 'Reading the last two weeks of spend-bar logs…' }
+  })
+
+  // The context gate: a prompt typed at or above the limit is held back once. Sending the same
+  // text again goes through. Slash commands (/compact, /clear) and prompts a plugin sends are never held.
+  on('prompt.submit', async ($, e, next) => {
+    if (contextGatePercent <= 0 || e.origin !== undefined || e.command || e.text.trim().startsWith('/')) {
+      return next(e)
+    }
+    const percent = (await read($, usage))?.contextPercent
+    if (percent == null || percent < contextGatePercent) {
+      lastGatedText = null
+      return next(e)
+    }
+    if (e.text === lastGatedText) {
+      lastGatedText = null
+      return next(e)
+    }
+    lastGatedText = e.text
+    return {
+      drop: `Context is at ${percent}% (gate ${contextGatePercent}%). Compact with ↓ or /compact, or start a new session. Send the same prompt again to go ahead anyway.`,
+    }
+  })
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     await flushStats($)
@@ -203,6 +236,10 @@ export const register: Register = (on, options) => {
   })
 
   on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: 'spend-review',
+      description: "Review this week's Claude Code spend against the week before, from spend-bar's own logs",
+    })
     const result = await next(e)
     await update($, now, () => Date.now())
     await refresh($)
@@ -245,6 +282,10 @@ export const register: Register = (on, options) => {
         $.ui.toast(
           `This turn has made ${requests} model requests, each resending the whole context. Consider stopping it, compacting, or splitting the work.`,
         )
+      }
+      if (turnRequestBrake > 0 && requests === turnRequestBrake) {
+        $.ui.toast(`Stopped: this turn reached ${requests} model requests (long-turn brake). Say "continue" to go on, or split the work.`)
+        await $.turn.abort({ turnId: e.turnId })
       }
       const at = await $.clock.now()
       await update($, lastResponseAt, () => at)

@@ -1,0 +1,13 @@
+{
+  "name": "spend-bar",
+  "owner": {
+    "name": "Kacper Harabasz"
+  },
+  "plugins": [
+    {
+      "name": "spend-bar",
+      "source": "./",
+      "description": "A bar above the prompt with usage limits or monthly extra-usage spend, session cost, prompt-cache status, context usage, compact and spend-review buttons, spend alerts, optional context gate and long-turn brake, and a weekly spend review"
+    }
+  ]
+}

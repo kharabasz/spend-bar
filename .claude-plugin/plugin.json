@@ -1,8 +1,8 @@
 {
   "name": "spend-bar",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "license": "MIT",
-  "description": "A bar above the prompt with usage limits or monthly extra-usage spend, session cost, prompt-cache status, context usage, compact and spend-review buttons, spend alerts, and trimming of long shell output",
+  "description": "A bar above the prompt with usage limits or monthly extra-usage spend, session cost, prompt-cache status, context usage, compact and spend-review buttons, spend alerts, and trimming of long shell output, optional context gate and long-turn brake, and a weekly spend review",
   "types": "./types/index.d.ts",
   "userConfig": {
     "cacheTtl": {
@@ -56,6 +56,21 @@
       "default": 100000,
       "min": 0
     },
+    "contextGatePercent": {
+      "type": "number",
+      "title": "Context gate (% context)",
+      "description": "Hold back a prompt typed at or above this share of the context window, once; sending it again goes through. Slash commands are never held. 0 turns it off",
+      "default": 0,
+      "min": 0,
+      "max": 100
+    },
+    "turnRequestBrake": {
+      "type": "number",
+      "title": "Long-turn brake (requests)",
+      "description": "Stop a main-thread turn when it reaches this many model requests; say continue to resume. Set it above the long-turn warning. 0 turns it off",
+      "default": 0,
+      "min": 0
+    },
     "trimLimit": {
       "type": "number",
       "title": "Trim tool output over (characters)",
@@ -63,5 +78,7 @@
       "default": 10000,
       "min": 0
     }
-  }
+  },
+  "homepage": "https://github.com/kharabasz/spend-bar",
+  "repository": "https://github.com/kharabasz/spend-bar"
 }

@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { buildPrompt, scoreLines } from '../hooks/optimize'
+import { buildPrompt, buildWeeklyPrompt, scoreLines, usdByDay } from '../hooks/optimize'
 import { firstWord } from '../hooks/stats'
 
 const BAND = {
@@ -77,6 +77,7 @@ function machine(on: Parameters<TestBody>[1], percent = 47) {
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
+  on('command.register', () => ({ value: undefined }))
   on('ui.toast', (_, e) => {
     toasts.push(String(e.text))
     return { value: undefined }
@@ -315,4 +316,61 @@ test('Optimize spend asks for stats when collection is off', { options: { collec
   expect(prompts).toEqual([])
   expect(toasts[0]).toContain('Collect usage stats')
   await ui.unmount()
+})
+
+test('the context gate holds a prompt once at or above the limit, and lets the same prompt through', { options: { contextGatePercent: 40 } }, async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { prompts } = machine(on, 47)
+  await start($)
+
+  const held = await $.prompt.submit({ text: 'refactor it' })
+  expect(held.drop).toContain('47%')
+  expect(prompts).toEqual([])
+  const sent = await $.prompt.submit({ text: 'refactor it' })
+  expect(sent.text).toBe('refactor it')
+  const slash = await $.prompt.submit({ text: '/compact' })
+  expect(slash.text).toBe('/compact')
+})
+
+test('the context gate is off by default and below its limit', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  machine(on, 47)
+  await start($)
+  expect((await $.prompt.submit({ text: 'go' })).text).toBe('go')
+})
+
+test('the long-turn brake aborts the turn at the limit, once', { options: { turnRequestBrake: 3 } }, async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { toasts } = machine(on)
+  const aborted: string[] = []
+  on('turn.abort', (_, e) => {
+    aborted.push(e.turnId)
+    return { value: undefined }
+  })
+  on('turn.step', stepAnswer())
+  await start($)
+
+  for (let index = 0; index < 5; index++) {
+    for await (const _ of $.turn.step({ turnId: 'turn-1', index, model: 'claude-opus-5-5', messageCount: 1 })) {
+    }
+  }
+  expect(aborted).toEqual(['turn-1'])
+  expect(toasts.filter(t => t.includes('long-turn brake'))).toHaveLength(1)
+})
+
+test('the weekly review compares this week with the one before', () => {
+  const day = (d: number) => new Date(2026, 10, d, 12).getTime()
+  const step = (d: number, usd: number) => ({ t: day(d), kind: 'step', sid: 's', turn: 't', in: 10, out: 5, cacheRead: 100, cacheWrite: 0, usd })
+  const byDay = usdByDay([step(6, 2), step(6, 3), step(1, 1)])
+  expect(byDay['2026-11-06']).toBe(5)
+  const prompt = buildWeeklyPrompt(
+    scoreLines([step(6, 5)]),
+    scoreLines([step(1, 2)]),
+    ['2026-11-06', '2026-11-05'],
+    byDay,
+    [],
+  )
+  expect(prompt).toContain('Weekly spend review')
+  expect(prompt).toContain('+150%')
+  expect(prompt).toContain('11-06 $5')
 })

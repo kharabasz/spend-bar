@@ -1,0 +1,9 @@
+#!/bin/sh
+# Last look before a public push: the whole tree at HEAD, not only what changed.
+file="${LEAK_PATTERN_FILE:-$HOME/.config/public-leak-check/pattern}"
+[ -r "$file" ] || { echo "leak check: no pattern file at $file" >&2; exit 1; }
+if git grep -n -iE -e "$(cat "$file")" HEAD -- . >/dev/null; then
+  echo "leak check: the tree matches the private-names pattern:" >&2
+  git grep -n -iE -e "$(cat "$file")" HEAD -- . | cut -c1-160 >&2
+  exit 1
+fi

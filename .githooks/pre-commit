@@ -1,0 +1,18 @@
+#!/bin/sh
+# Refuses a commit whose added lines or file names match the private-names pattern.
+# The pattern (an extended regex, case-insensitive) lives outside the repo, so this public
+# repo never names what it keeps out: $LEAK_PATTERN_FILE or ~/.config/public-leak-check/pattern.
+file="${LEAK_PATTERN_FILE:-$HOME/.config/public-leak-check/pattern}"
+if [ ! -r "$file" ]; then
+  echo "leak check: no pattern file at $file; create it or set LEAK_PATTERN_FILE" >&2
+  exit 1
+fi
+pattern=$(cat "$file")
+lines=$(git diff --cached -U0 --diff-filter=ACMR | grep -E '^\+' | grep -vE '^\+\+\+ ' | grep -iE -e "$pattern")
+names=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE -e "$pattern")
+if [ -n "$lines" ] || [ -n "$names" ]; then
+  echo "leak check: this commit matches the private-names pattern:" >&2
+  [ -n "$names" ] && echo "$names" | sed 's/^/  file: /' >&2
+  [ -n "$lines" ] && echo "$lines" | cut -c1-160 | sed 's/^/  /' >&2
+  exit 1
+fi

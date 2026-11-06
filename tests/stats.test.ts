@@ -84,6 +84,7 @@ function machine(on: Parameters<TestBody>[1], place: Place = WINDOWS, usage: Usa
     store.delete(e.key)
     return { value: undefined }
   })
+  on('command.register', () => ({ value: undefined }))
   on('ui.log', (_, e) => {
     logs.push(String(e.text))
     return { value: undefined }

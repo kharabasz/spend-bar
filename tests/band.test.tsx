@@ -29,6 +29,7 @@ const USAGE = {
 test('the band draws its pills and the compact button, on every surface', async ($, on) => {
   mock.clock(on)
   on('session.usage', () => USAGE)
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -62,6 +63,7 @@ test('pressing Compact runs /compact and shows Compacting… until it ends', asy
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -95,6 +97,7 @@ test('Compact is dimmed and does nothing below 30% context', async ($, on) => {
     submits += 1
     return { text: e.text }
   })
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -118,6 +121,7 @@ test('an automatic compaction also shows Compacting…', async ($, on) => {
     })
     return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
   })
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -167,6 +171,7 @@ test('an Enterprise seat shows the month and the session cost instead of empty l
   on('session.usage', () => ENTERPRISE_USAGE)
   on('mcp.call', (_, e) => (e.server === 'ccd_session_mgmt' && e.tool === 'get_usage' ? getUsage('7.02') : { value: { content: [], isError: true } }))
   const toasts = toastsOf(on)
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -183,6 +188,7 @@ test('the month warns once at 75% and the pill turns amber', async ($, on) => {
   on('session.usage', () => ENTERPRISE_USAGE)
   on('mcp.call', () => getUsage('1400.00'))
   const toasts = toastsOf(on)
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -202,6 +208,7 @@ test('without the desktop app the month is skipped and the bar still draws', asy
   })
   on('turn.complete', () => ({ text: '' }))
   toastsOf(on)
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.complete({ turnId: 't', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
@@ -224,6 +231,7 @@ test('in the desktop app a get_usage failure at session start is retried after t
   })
   on('turn.complete', () => ({ text: '' }))
   toastsOf(on)
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.turn.complete({ turnId: 't', answer: '', durationMs: 1, isAborted: false, reason: 'answer' })
@@ -241,6 +249,7 @@ test('the session cost warns at each multiple of the warning', { options: { sess
   on('mcp.call', () => getUsage('7.02'))
   on('session.measure', (_, e) => ({ changed: e.changed }))
   const toasts = toastsOf(on)
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -269,6 +278,7 @@ test('a large cache rewrite after the cache expired raises a toast with its cost
       usage: { model: 'claude-opus-5-5', input_tokens: 1, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: write },
     }
   })
+  on('command.register', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 

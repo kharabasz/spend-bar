@@ -214,6 +214,55 @@ export function buildPrompt(session: Score, week: Score, days: readonly DayTotal
   ].join('\n')
 }
 
+export function usdByDay(lines: readonly Line[]): Tally {
+  const byDay: Tally = {}
+  for (const line of lines) {
+    if (line.kind === 'step') bump(byDay, dayOf(line.t), numberOf(line.usd))
+  }
+  return byDay
+}
+
+function change(now: number, before: number): string {
+  if (before <= 0) return now > 0 ? 'new' : 'flat'
+  const delta = Math.round(((now - before) / before) * 100)
+  return `${delta >= 0 ? '+' : ''}${delta}%`
+}
+
+function dayCosts(byDay: Tally, days: readonly string[]): string {
+  return [...days]
+    .reverse()
+    .map(day => `${day.slice(5)} ${dollars(byDay[day] ?? 0)}`)
+    .join(', ')
+}
+
+// The weekly review: this week set against the one before, from the event logs alone.
+export function buildWeeklyPrompt(
+  week: Score,
+  prior: Score,
+  days: readonly string[],
+  byDay: Tally,
+  totals: readonly DayTotals[],
+): string {
+  const commands = top(week.commands, TOP_COMMANDS)
+    .map(([cmd, n]) => `${cmd} ${n}${week.commandErrors[cmd] ? ` (${week.commandErrors[cmd]} failed)` : ''}`)
+    .join(', ')
+  const errors = top(week.errors, TOP_ERRORS)
+    .map(([text, n]) => `"${text}" x${n}`)
+    .join('; ')
+  return [
+    'Weekly spend review from the spend-bar mod. Compare this week with the one before and tell me, in under 300 words:',
+    'what changed and why it likely did, the three to five habits, settings, CLAUDE.md rules, hooks or scripts that would cut the most, biggest saving first,',
+    'and one number to watch next week. Do not run tools or change files; just answer.',
+    '',
+    `This week (last ${WEEK_DAYS} days): ${describeScore(week)}; ${describeTotals(totals)}.`,
+    `The week before: ${describeScore(prior)}.`,
+    `Estimated cost against the week before: ${change(week.usd, prior.usd)} (${dollars(week.usd)} vs ${dollars(prior.usd)}); requests ${change(week.requests, prior.requests)}.`,
+    `Estimated cost by day: ${dayCosts(byDay, days)}.`,
+    `Top shell commands this week: ${commands || 'none'}.`,
+    ...(errors ? [`Most common shell errors: ${errors}.`] : []),
+  ].join('\n')
+}
+
 function parseLines(text: string): Line[] {
   const parsed: Line[] = []
   for (const row of text.split('\n')) {
@@ -254,6 +303,24 @@ async function readTotals($: EngineInterface, days: readonly string[]): Promise<
     if (stored && typeof stored === 'object') totals.push(stored as DayTotals)
   }
   return totals
+}
+
+export async function weeklyReviewPrompt($: EngineInterface): Promise<string | null> {
+  if (!isCollectingStats()) return null
+  await flushStats($)
+  const days = weekDays(await $.clock.now())
+  const before = weekDays((await $.clock.now()) - WEEK_DAYS * DAY)
+  const lines = await readWeek($, [...days, ...before])
+  const inWeek = new Set(days)
+  const thisWeek = lines.filter(line => inWeek.has(dayOf(line.t)))
+  const lastWeek = lines.filter(line => !inWeek.has(dayOf(line.t)))
+  return buildWeeklyPrompt(
+    scoreLines(thisWeek),
+    scoreLines(lastWeek),
+    days,
+    usdByDay(lines),
+    await readTotals($, days),
+  )
 }
 
 export async function spendReviewPrompt($: EngineInterface): Promise<string | null> {
