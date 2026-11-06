@@ -146,10 +146,10 @@ const ENTERPRISE_USAGE = {
   },
 }
 
-function getUsage(spent: string) {
+function getUsage(spent: string, planName = 'Enterprise') {
   const plan = {
     status: 'ok',
-    plan: 'Enterprise',
+    plan: planName,
     windows: [],
     extraUsage: { enabled: true, percentUsed: 0, spent, monthlyLimit: '1800.00', currency: 'USD' },
   }
@@ -182,6 +182,40 @@ test('an Enterprise seat shows the month and the session cost instead of empty l
   expect(toasts).toEqual([])
   await ui.unmount()
 })
+
+for (const planName of ['Free', 'Pro', 'Max', 'Max 5x', 'pro']) {
+  test(`a ${planName} plan with extra usage on shows no month and no month toast`, async ($, on) => {
+    mock.clock(on)
+    on('session.usage', () => ENTERPRISE_USAGE)
+    on('mcp.call', () => getUsage('1700.00', planName))
+    const toasts = toastsOf(on)
+    on('command.register', () => ({ value: undefined }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /month / })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /session \$3\.20/ })).toBeTruthy()
+    expect(toasts).toEqual([])
+    await ui.unmount()
+  })
+}
+
+for (const planName of ['Team', 'Enterprise', 'Professional Services']) {
+  test(`a ${planName} plan keeps the month`, async ($, on) => {
+    mock.clock(on)
+    on('session.usage', () => ENTERPRISE_USAGE)
+    on('mcp.call', () => getUsage('7.02', planName))
+    toastsOf(on)
+    on('command.register', () => ({ value: undefined }))
+    on('session.start', (_, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+    const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /month \$7\.02\/\$1800/ })).toBeTruthy()
+    await ui.unmount()
+  })
+}
 
 test('the month warns once at 75% and the pill turns amber', async ($, on) => {
   mock.clock(on)

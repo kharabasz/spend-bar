@@ -4,7 +4,7 @@ A bar above the prompt showing:
 
 - **Usage limits**, by how the account is billed:
   - on a subscription, the **session (5h) and weekly limits**, with time until each resets — amber above 70%, red above 90%
-  - on an Enterprise or Team seat with usage-based billing, which has no 5h or weekly windows, the **month's extra-usage spend against its limit** (`month $412/$1800`), read from the desktop app's `get_usage` tool at session start, hourly and after a turn once the reading is 10 minutes old or missing (so a failed read at session start, while the app is still connecting, is retried) — amber from 75%, red from 90%, with a toast as it crosses each. The terminal has no such tool, so it shows no month figure
+  - on an Enterprise or Team seat with usage-based billing, which has no 5h or weekly windows, the **month's extra-usage spend against its limit** (`month $412/$1800`), read from the desktop app's `get_usage` tool at session start, hourly and after a turn once the reading is 10 minutes old or missing (so a failed read at session start, while the app is still connecting, is retried) — amber from 75%, red from 90%, with a toast as it crosses each. The terminal has no such tool, so it shows no month figure. Personal plans (Free, Pro, Max) never show it, even with extra usage turned on
   - behind a gateway, its **spend limit** (`spend 40%`)
 - **Session cost**, as `/cost` totals it — amber from $25, red from $50
 - **Prompt cache status**, counted down from the last model response — amber in the last fifth of the TTL, red once expired

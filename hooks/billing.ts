@@ -20,6 +20,7 @@ const MONTHLY_STALE_MS = 10 * MINUTE
 const MONTH_WARN_PERCENTS = [75, 90]
 const RETRY_MS = MINUTE
 const MAX_RETRIES = 5
+const PERSONAL_PLAN = /^(free|pro|max)\b/i
 
 let sessionWarningUsd = 25
 let isRefreshing = false
@@ -43,6 +44,7 @@ export function parseMonthly(text: string, at: number): Monthly | null | 'unavai
   const extra = plan?.extraUsage
   if (plan?.status === 'unavailable') return 'unavailable'
   if (plan?.status !== 'ok' || !extra || extra.enabled !== true) return null
+  if (PERSONAL_PLAN.test(plan.plan ?? '')) return null
   const spent = amountOf(extra.spent)
   const limit = amountOf(extra.monthlyLimit)
   if (Number.isNaN(spent) || Number.isNaN(limit)) return null
