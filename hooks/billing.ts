@@ -26,7 +26,7 @@ let sessionWarningUsd = 25
 let isRefreshing = false
 let retries = 0
 let hasMonthly = true
-let isDesktop = false
+let canRetry = false
 let warnedSessionSteps = 0
 let warnedMonthPercent = 0
 let stopRefreshing: (() => void) | undefined
@@ -79,9 +79,10 @@ export async function refreshMonthly($: EngineInterface, ifStale = false) {
     if (value) await warnMonth($, value)
   } catch {
     // In the desktop app the call can fail while the app's MCP servers are still connecting at
-    // session start, so the next turn asks again. Elsewhere (a terminal session, -p, the SDK) there
-    // is no get_usage tool: the month is unknown, so stop asking.
-    if (isDesktop) retryMonthly($)
+    // session start, so it is asked again shortly and after each turn. Only a terminal session is
+    // known to have no get_usage tool, so only there does it stop asking. The desktop app reports
+    // its surface as null, not 'desktop', so an unknown surface keeps trying.
+    if (canRetry) retryMonthly($)
     else hasMonthly = false
   } finally {
     isRefreshing = false
@@ -106,7 +107,7 @@ async function warnMonth($: EngineInterface, value: Monthly) {
 export async function startBilling($: EngineInterface, surface: string | null) {
   hasMonthly = true
   retries = 0
-  isDesktop = surface === 'desktop'
+  canRetry = surface !== 'terminal'
   warnedSessionSteps = 0
   warnedMonthPercent = 0
   await refreshMonthly($)
