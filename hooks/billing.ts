@@ -18,9 +18,12 @@ const MINUTE = 60_000
 const MONTHLY_REFRESH_MS = 60 * MINUTE
 const MONTHLY_STALE_MS = 10 * MINUTE
 const MONTH_WARN_PERCENTS = [75, 90]
+const RETRY_MS = MINUTE
+const MAX_RETRIES = 5
 
 let sessionWarningUsd = 25
 let isRefreshing = false
+let retries = 0
 let hasMonthly = true
 let isDesktop = false
 let warnedSessionSteps = 0
@@ -33,9 +36,12 @@ function amountOf(value: unknown): number {
 }
 
 // The get_usage reply's `plan.extraUsage`, or null where the account has none.
-export function parseMonthly(text: string, at: number): Monthly | null {
+// 'unavailable' is the app saying the plan could not be read just now: not an answer, so the
+// last reading stands and the read is tried again shortly.
+export function parseMonthly(text: string, at: number): Monthly | null | 'unavailable' {
   const plan = (JSON.parse(text) as { plan?: { status?: string; plan?: string; extraUsage?: Record<string, unknown> } }).plan
   const extra = plan?.extraUsage
+  if (plan?.status === 'unavailable') return 'unavailable'
   if (plan?.status !== 'ok' || !extra || extra.enabled !== true) return null
   const spent = amountOf(extra.spent)
   const limit = amountOf(extra.monthlyLimit)
@@ -62,16 +68,30 @@ export async function refreshMonthly($: EngineInterface, ifStale = false) {
     const text = block && block.type === 'text' ? block.text : undefined
     if (reply.isError || text === undefined) return
     const value = parseMonthly(text, at)
+    if (value === 'unavailable') {
+      retryMonthly($)
+      return
+    }
+    retries = 0
     await update($, monthly, () => value)
     if (value) await warnMonth($, value)
   } catch {
     // In the desktop app the call can fail while the app's MCP servers are still connecting at
     // session start, so the next turn asks again. Elsewhere (a terminal session, -p, the SDK) there
     // is no get_usage tool: the month is unknown, so stop asking.
-    if (!isDesktop) hasMonthly = false
+    if (isDesktop) retryMonthly($)
+    else hasMonthly = false
   } finally {
     isRefreshing = false
   }
+}
+
+function retryMonthly($: EngineInterface) {
+  if (retries >= MAX_RETRIES) return
+  retries++
+  $.clock.after(RETRY_MS, () => {
+    void refreshMonthly($)
+  })
 }
 
 async function warnMonth($: EngineInterface, value: Monthly) {
@@ -83,6 +103,7 @@ async function warnMonth($: EngineInterface, value: Monthly) {
 
 export async function startBilling($: EngineInterface, surface: string | null) {
   hasMonthly = true
+  retries = 0
   isDesktop = surface === 'desktop'
   warnedSessionSteps = 0
   warnedMonthPercent = 0

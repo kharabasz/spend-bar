@@ -294,3 +294,26 @@ test('a large cache rewrite after the cache expired raises a toast with its cost
   expect(toasts[0]).toContain('idle 2h00m')
   expect(toasts[0]).toContain('rewrote 500k tokens, about $4.00')
 })
+
+test('an unavailable plan reading at session start is retried in a minute and the month appears', async ($, on) => {
+  const clock = mock.clock(on)
+  on('session.usage', () => ENTERPRISE_USAGE)
+  let calls = 0
+  on('mcp.call', () => {
+    calls++
+    if (calls > 1) return getUsage('721.33')
+    const plan = { status: 'unavailable', note: 'Try again in a minute' }
+    return { value: { content: [{ type: 'text', text: JSON.stringify({ plan }) }], isError: false } }
+  })
+  toastsOf(on)
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(calls).toBe(1)
+  await clock.advance(61_000)
+
+  expect(calls).toBe(2)
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /month \$721\/\$1800/ })).toBeTruthy()
+  await ui.unmount()
+})
