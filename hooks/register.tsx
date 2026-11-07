@@ -361,7 +361,7 @@ export const register: Register = (on, options) => {
     } else {
       const left = last + ttlMs - at
       if (left <= 0) {
-        pills.push(pill('cache', 'alert', `cache expired ${duration(-left)} ago`))
+        pills.push(pill('cache', 'alert', 'cache expired'))
       } else {
         pills.push(pill('cache', left <= cacheWarnMs ? 'warn' : 'ok', `cache ${duration(left)} left`))
       }
