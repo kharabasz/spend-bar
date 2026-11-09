@@ -43,6 +43,7 @@ function machine(on: Parameters<TestBody>[1], percent = 47) {
   const store = new Map<string, unknown>()
   const toasts: string[] = []
   const prompts: string[] = []
+  const contexts: (readonly string[] | undefined)[] = []
   on('env.get', (_, e) => ({ value: e.name === 'LOCALAPPDATA' ? ROOT : undefined }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
@@ -84,11 +85,13 @@ function machine(on: Parameters<TestBody>[1], percent = 47) {
   })
   on('prompt.submit', (_, e) => {
     prompts.push(e.text)
+    contexts.push(e.context)
     return { text: e.text }
   })
+  on('classic.PostToolBatch', () => ({}))
   on('turn.complete', () => ({ text: '' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  return { files, store, toasts, prompts, own }
+  return { files, store, toasts, prompts, contexts, own }
 }
 
 function stepAnswer(cacheWrite = 40) {
@@ -318,18 +321,18 @@ test('Optimize spend asks for stats when collection is off', { options: { collec
   await ui.unmount()
 })
 
-test('the context gate holds a prompt once at or above the limit, and lets the same prompt through', { options: { contextGatePercent: 40 } }, async ($, on) => {
+test('the context gate adds a model-only note to the first turn at or above the limit, once per crossing', { options: { contextGatePercent: 40 } }, async ($, on) => {
   mock.clock(on, { now: NOW })
-  const { prompts } = machine(on, 47)
+  const { contexts } = machine(on, 47)
   await start($)
-
-  const held = await $.prompt.submit({ text: 'refactor it' })
-  expect(held.drop).toContain('47%')
-  expect(prompts).toEqual([])
-  const sent = await $.prompt.submit({ text: 'refactor it' })
-  expect(sent.text).toBe('refactor it')
-  const slash = await $.prompt.submit({ text: '/compact' })
-  expect(slash.text).toBe('/compact')
+  await $.prompt.submit({ text: 'refactor it' })
+  await $.prompt.submit({ text: 'and again' })
+  await $.prompt.submit({ text: '/compact' })
+  expect(contexts[0]).toHaveLength(1)
+  expect(contexts[0]![0]).toContain('47%')
+  expect(contexts[0]![0]).toContain('/compact')
+  expect(contexts[1]).toBeUndefined()
+  expect(contexts[2]).toBeUndefined()
 })
 
 test('the context gate is off by default and below its limit', async ($, on) => {
@@ -339,7 +342,7 @@ test('the context gate is off by default and below its limit', async ($, on) => 
   expect((await $.prompt.submit({ text: 'go' })).text).toBe('go')
 })
 
-test('the long-turn brake aborts the turn at the limit, once', { options: { turnRequestBrake: 3 } }, async ($, on) => {
+test('the long-turn brake tells the model to stop at the limit, once, without aborting', { options: { turnRequestBrake: 3 } }, async ($, on) => {
   mock.clock(on, { now: NOW })
   const { toasts } = machine(on)
   const aborted: string[] = []
@@ -349,13 +352,21 @@ test('the long-turn brake aborts the turn at the limit, once', { options: { turn
   })
   on('turn.step', stepAnswer())
   await start($)
+  const notes: (string[] | undefined)[] = []
+  const batch = async () => {
+    const result = await $.classic.PostToolBatch({ tool_calls: [] } as never)
+    notes.push(result.additionalContext)
+  }
 
   for (let index = 0; index < 5; index++) {
     for await (const _ of $.turn.step({ turnId: 'turn-1', index, model: 'claude-opus-5-5', messageCount: 1 })) {
     }
+    await batch()
   }
-  expect(aborted).toEqual(['turn-1'])
-  expect(toasts.filter(t => t.includes('long-turn brake'))).toHaveLength(1)
+  expect(aborted).toEqual([])
+  expect(notes.map(n => n?.length ?? 0)).toEqual([0, 0, 1, 0, 0])
+  expect(notes[2]![0]).toContain('ask the user')
+  expect(toasts.filter(t => t.includes('Long-turn brake'))).toHaveLength(1)
 })
 
 test('the weekly review compares this week with the one before', () => {

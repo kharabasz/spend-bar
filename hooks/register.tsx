@@ -104,6 +104,22 @@ function kTokens(tokens: number): string {
   return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens)
 }
 
+function contextGateNote(percent: number): string {
+  return (
+    `<spend-bar-notice>This session's context is ${percent}% full, so every request resends a very large prompt. ` +
+    'Before starting new work, tell the user in one line that they should run /compact or hand off to a fresh session ' +
+    '(a short handoff note is cheaper than compacting). Then continue with their request.</spend-bar-notice>'
+  )
+}
+
+function turnBrakeNote(requests: number): string {
+  return (
+    `<spend-bar-notice>This turn has made ${requests} model requests, each resending the whole context. ` +
+    'Stop now: do not call more tools. Summarize what you have done and what is left, then ask the user ' +
+    'whether to continue before doing anything else.</spend-bar-notice>'
+  )
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -169,7 +185,9 @@ export const register: Register = (on, options) => {
   // Enforce options: both off (0) by default.
   const contextGatePercent = thresholdOf(options.contextGatePercent, 0)
   const turnRequestBrake = thresholdOf(options.turnRequestBrake, 0)
-  let lastGatedText: string | null = null
+  let isGateNoted = false
+  let isBrakePending = false
+  let brakeRequests = 0
 
   const ttlMs = options.cacheTtl === '5m' ? 5 * MINUTE : 60 * MINUTE
   // Amber in the last fifth of the TTL: 12m of an hour, 1m of five minutes.
@@ -201,28 +219,38 @@ export const register: Register = (on, options) => {
       void optimizeSpend($, true)
     })
 
-    return { text: 'Reading the last two weeks of spend-bar logs…' }
+    return { text: 'Reading the last 7 days of spend-bar logs, and the week before for comparison…' }
   })
 
-  // The context gate: a prompt typed at or above the limit is held back once. Sending the same
-  // text again goes through. Slash commands (/compact, /clear) and prompts a plugin sends are never held.
+  // The context gate: a new user turn that starts at or above the limit carries a note only the model
+  // reads (prompt.submit's `context`), asking it to tell the user to compact or hand off before new work.
+  // Once per crossing: it re-arms when the context falls back under the limit (a compaction, /clear).
+  // Slash commands, prompts typed into a running turn and prompts a plugin sends get no note.
   on('prompt.submit', async ($, e, next) => {
-    if (contextGatePercent <= 0 || e.origin !== undefined || e.command || e.text.trim().startsWith('/')) {
+    if (contextGatePercent <= 0 || e.origin !== undefined || e.command || e.turnId !== undefined || e.text.trim().startsWith('/')) {
       return next(e)
     }
     const percent = (await read($, usage))?.contextPercent
     if (percent == null || percent < contextGatePercent) {
-      lastGatedText = null
+      isGateNoted = false
       return next(e)
     }
-    if (e.text === lastGatedText) {
-      lastGatedText = null
+    if (isGateNoted) {
       return next(e)
     }
-    lastGatedText = e.text
-    return {
-      drop: `Context is at ${percent}% (gate ${contextGatePercent}%). Compact with ↓ or /compact, or start a new session. Send the same prompt again to go ahead anyway.`,
+    isGateNoted = true
+    return next({ ...e, context: [...(e.context ?? []), contextGateNote(percent)] })
+  })
+
+  // The long-turn brake: at the limit the next tool batch of the main thread carries a note telling
+  // the model to stop and report. PostToolBatch is the last hook before the turn's next model request.
+  on('classic.PostToolBatch', async (_, e, next) => {
+    const result = await next(e)
+    if (!isBrakePending || e.agent_id !== undefined) {
+      return result
     }
+    isBrakePending = false
+    return { ...result, additionalContext: [...(result.additionalContext ?? []), turnBrakeNote(brakeRequests)] }
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -276,14 +304,18 @@ export const register: Register = (on, options) => {
         )
       }
       const requests = countMainRequest(e.turnId)
+      if (requests === 1) {
+        isBrakePending = false
+      }
       if (turnRequestWarning > 0 && requests === turnRequestWarning) {
         $.ui.toast(
           `This turn has made ${requests} model requests, each resending the whole context. Consider stopping it, compacting, or splitting the work.`,
         )
       }
       if (turnRequestBrake > 0 && requests === turnRequestBrake) {
-        $.ui.toast(`Stopped: this turn reached ${requests} model requests (long-turn brake). Say "continue" to go on, or split the work.`)
-        await $.turn.abort({ turnId: e.turnId })
+        $.ui.toast(`Long-turn brake: this turn reached ${requests} model requests, so Claude was told to stop and ask before continuing.`)
+        isBrakePending = true
+        brakeRequests = requests
       }
       const at = await $.clock.now()
       await update($, lastResponseAt, () => at)

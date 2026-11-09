@@ -25,14 +25,14 @@ Options, in the config menu: **Prompt cache TTL** (`1h` default for subscription
 
 ## Enforce options
 
-Warnings only ask. These two options act, and both are off (`0`) by default:
+Warnings only tell you. These two options tell Claude, by adding a note to what the model reads (you do not see it), and are off (`0`) by default:
 
-- **Context gate** (`contextGatePercent`): a prompt typed while context is at or above this share is held back once, with a note to compact or start a new session. Send the same prompt again to go ahead anyway. Slash commands (`/compact`, `/clear`) and prompts sent by plugins are never held.
-- **Long-turn brake** (`turnRequestBrake`): the main-thread turn is stopped when it reaches this many model requests. Say "continue" to go on. Set it above **Long turn warning** so the toast comes first.
+- **Context gate** (`contextGatePercent`): when a new turn starts with context at or above this share, Claude is told to say in one line, before new work, that you should `/compact` or hand off to a fresh session (a short handoff note is cheaper). Once per crossing; it re-arms when context falls back under the limit. Slash commands, prompts typed into a running turn and prompts sent by plugins get no note.
+- **Long-turn brake** (`turnRequestBrake`): when the main-thread turn reaches this many model requests, Claude is told, with the next tool results, to stop, summarize what is done and what is left, and ask before continuing. Set it above **Long turn warning** so the toast comes first. A model can ignore the note; nothing is aborted.
 
 ## Weekly spend review
 
-`/spend-review` reads the last 14 days of spend-bar's own event logs and asks Claude to compare this week with the one before: estimated cost by day, the share of tokens sent at high context, long turns, repeated reads, cache rewrites, subagent share and the most common shell errors. It sends metadata only, never prompt text. The **$** button gives the shorter review of this session and the past week.
+`/spend-review` reads the last 7 days of spend-bar's own event logs (and the 7 before, for comparison) and asks Claude to compare this week with the one before: estimated cost by day, the share of tokens sent at high context, long turns, repeated reads, cache rewrites, subagent share and the most common shell errors. It sends metadata only, never prompt text. The **$** button gives the shorter review of this session and the past week.
 
 To run it every week, set a recurring local reminder (for example `/loop 7d /spend-review`, or a scheduled task that opens a session and runs `/spend-review`). A cloud routine cannot read the logs, which stay on your machine.
 
