@@ -73,7 +73,7 @@ claude plugin install spend-bar --marketplace kharabasz/spend-bar
 claude plugin uninstall spend-bar@claude-toolkit
 ```
 
-The event logs do not depend on the plugin id, so history stays. The daily totals live in the plugin store under the old id and start again from zero; `scripts/migrate-store.sh` copies them across once.
+The event logs do not depend on the plugin id, so history stays. The daily totals live in the plugin store, which is keyed by plugin id, so they start again from zero under a new id.
 
 ## Developing
 
