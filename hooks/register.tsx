@@ -13,6 +13,8 @@ import {
   statsMeasured,
   statsSessionStarted,
   statsStepEnded,
+  statsLocation,
+  statsSessionId,
   statsStepStarting,
 } from './stats'
 import { spendReviewPrompt, weeklyReviewPrompt } from './optimize'
@@ -120,6 +122,24 @@ function turnBrakeNote(requests: number): string {
   )
 }
 
+// The long-turn brake's note reaches the model through a PostToolBatch command hook
+// (scripts/brake-note.sh), not the mod's classic.PostToolBatch: the built-in security guard sends that
+// event past installed plugins on Team and Enterprise seats, but a plugin's command hooks still run.
+// The file holds the hook's whole JSON output; the script prints it once on the main thread's next
+// tool batch and empties it. An empty file is no note, so a new turn clears a note left unsent.
+async function setBrakeNote($: EngineInterface, note: string) {
+  const place = statsLocation()
+  if (!place) return
+  const path = `${place.dir}${place.sep}pending${place.sep}${statsSessionId()}.brake.json`
+  const text = note ? JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolBatch', additionalContext: note } }) + '\n' : ''
+  try {
+    if (!text && !(await $.fs.exists(path))) return
+    await $.fs.write(path, text)
+  } catch (error) {
+    $.ui.log(`spend-bar: writing the long-turn brake note failed: ${messageOf(error)}`, { to: 'debug' })
+  }
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -186,8 +206,6 @@ export const register: Register = (on, options) => {
   const contextGatePercent = thresholdOf(options.contextGatePercent, 0)
   const turnRequestBrake = thresholdOf(options.turnRequestBrake, 0)
   let isGateNoted = false
-  let isBrakePending = false
-  let brakeRequests = 0
 
   const ttlMs = options.cacheTtl === '5m' ? 5 * MINUTE : 60 * MINUTE
   // Amber in the last fifth of the TTL: 12m of an hour, 1m of five minutes.
@@ -242,17 +260,6 @@ export const register: Register = (on, options) => {
     return next({ ...e, context: [...(e.context ?? []), contextGateNote(percent)] })
   })
 
-  // The long-turn brake: at the limit the next tool batch of the main thread carries a note telling
-  // the model to stop and report. PostToolBatch is the last hook before the turn's next model request.
-  on('classic.PostToolBatch', async (_, e, next) => {
-    const result = await next(e)
-    if (!isBrakePending || e.agent_id !== undefined) {
-      return result
-    }
-    isBrakePending = false
-    return { ...result, additionalContext: [...(result.additionalContext ?? []), turnBrakeNote(brakeRequests)] }
-  })
-
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     await flushStats($)
@@ -304,8 +311,8 @@ export const register: Register = (on, options) => {
         )
       }
       const requests = countMainRequest(e.turnId)
-      if (requests === 1) {
-        isBrakePending = false
+      if (requests === 1 && turnRequestBrake > 0) {
+        await setBrakeNote($, '')
       }
       if (turnRequestWarning > 0 && requests === turnRequestWarning) {
         $.ui.toast(
@@ -314,8 +321,7 @@ export const register: Register = (on, options) => {
       }
       if (turnRequestBrake > 0 && requests === turnRequestBrake) {
         $.ui.toast(`Long-turn brake: this turn reached ${requests} model requests, so Claude was told to stop and ask before continuing.`)
-        isBrakePending = true
-        brakeRequests = requests
+        await setBrakeNote($, turnBrakeNote(requests))
       }
       const at = await $.clock.now()
       await update($, lastResponseAt, () => at)
