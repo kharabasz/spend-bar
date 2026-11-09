@@ -342,9 +342,9 @@ test('the context gate is off by default and below its limit', async ($, on) => 
   expect((await $.prompt.submit({ text: 'go' })).text).toBe('go')
 })
 
-test('the long-turn brake tells the model to stop at the limit, once, without aborting', { options: { turnRequestBrake: 3 } }, async ($, on) => {
+test('the long-turn brake leaves its note for the PostToolBatch command hook, once, without aborting', { options: { turnRequestBrake: 3 } }, async ($, on) => {
   mock.clock(on, { now: NOW })
-  const { toasts } = machine(on)
+  const { files, toasts } = machine(on)
   const aborted: string[] = []
   on('turn.abort', (_, e) => {
     aborted.push(e.turnId)
@@ -352,21 +352,41 @@ test('the long-turn brake tells the model to stop at the limit, once, without ab
   })
   on('turn.step', stepAnswer())
   await start($)
-  const notes: (string[] | undefined)[] = []
-  const batch = async () => {
-    const result = await $.classic.PostToolBatch({ tool_calls: [] } as never)
-    notes.push(result.additionalContext)
+  const NOTE = `${EVENTS}\\pending\\sess-1.brake.json`
+  const step = async (turnId: string, index: number) => {
+    for await (const _ of $.turn.step({ turnId, index, model: 'claude-opus-5-5', messageCount: 1 })) {
+    }
   }
 
-  for (let index = 0; index < 5; index++) {
+  await step('turn-1', 0)
+  await step('turn-1', 1)
+  expect(files.get(NOTE) ?? '').toBe('')
+  await step('turn-1', 2)
+  const output = JSON.parse(files.get(NOTE)!)
+  expect(output.hookSpecificOutput.hookEventName).toBe('PostToolBatch')
+  expect(output.hookSpecificOutput.additionalContext).toContain('ask the user')
+  // The hook empties the file once it prints the note; later requests in the turn leave it empty.
+  files.set(NOTE, '')
+  await step('turn-1', 3)
+  expect(files.get(NOTE)).toBe('')
+  expect(aborted).toEqual([])
+  expect(toasts.filter(t => t.includes('Long-turn brake'))).toHaveLength(1)
+})
+
+test('a new turn clears a long-turn brake note that never reached a tool batch', { options: { turnRequestBrake: 2 } }, async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const { files } = machine(on)
+  on('turn.step', stepAnswer())
+  await start($)
+  const NOTE = `${EVENTS}\\pending\\sess-1.brake.json`
+  for (const index of [0, 1]) {
     for await (const _ of $.turn.step({ turnId: 'turn-1', index, model: 'claude-opus-5-5', messageCount: 1 })) {
     }
-    await batch()
   }
-  expect(aborted).toEqual([])
-  expect(notes.map(n => n?.length ?? 0)).toEqual([0, 0, 1, 0, 0])
-  expect(notes[2]![0]).toContain('ask the user')
-  expect(toasts.filter(t => t.includes('Long-turn brake'))).toHaveLength(1)
+  expect(files.get(NOTE)).toContain('additionalContext')
+  for await (const _ of $.turn.step({ turnId: 'turn-2', index: 0, model: 'claude-opus-5-5', messageCount: 1 })) {
+  }
+  expect(files.get(NOTE)).toBe('')
 })
 
 test('the weekly review compares this week with the one before', () => {
