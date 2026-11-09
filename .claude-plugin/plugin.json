@@ -1,6 +1,6 @@
 {
   "name": "spend-bar",
-  "version": "0.5.7",
+  "version": "0.6.0",
   "license": "MIT",
   "description": "A bar above the prompt with usage limits or monthly extra-usage spend, session cost, prompt-cache status, context usage, compact and spend-review buttons, spend alerts, and trimming of long shell output, optional context gate and long-turn brake, and a weekly spend review",
   "types": "./types/index.d.ts",
@@ -59,7 +59,7 @@
     "contextGatePercent": {
       "type": "number",
       "title": "Context gate (% context)",
-      "description": "Hold back a prompt typed at or above this share of the context window, once; sending it again goes through. Slash commands are never held. 0 turns it off",
+      "description": "When a new turn starts at or above this share of the context window, tell Claude to ask you to compact or hand off first (once per crossing). 0 turns it off",
       "default": 0,
       "min": 0,
       "max": 100
@@ -67,7 +67,7 @@
     "turnRequestBrake": {
       "type": "number",
       "title": "Long-turn brake (requests)",
-      "description": "Stop a main-thread turn when it reaches this many model requests; say continue to resume. Set it above the long-turn warning. 0 turns it off",
+      "description": "When one main-thread turn reaches this many model requests, tell Claude to stop, summarize and ask before continuing. Set it above the long-turn warning. 0 turns it off",
       "default": 0,
       "min": 0
     },
