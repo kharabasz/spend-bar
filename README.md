@@ -10,7 +10,7 @@ A bar above the prompt showing:
 - **Prompt cache status**, counted down from the last model response — amber in the last fifth of the TTL, red once expired
 - **Context usage**, as a percentage of the window — amber above 20%, red above 30%
 - A **↓** (Compact) button, hotkey `c` while the bar has focus, that runs `/compact` in the chat, as the session rail does. It reads **↓…** while any compaction runs (automatic ones too) and is dimmed and inactive below 30% context. It turns amber from 40% context, the point to compact by
-- A **$** (Optimize spend) button, hotkey `o`, that scores this session and the past week from the usage stats below and asks Claude for suggestions. It looks at the share of tokens sent above 40% context, turns over 50 requests, shell calls per request, repeated reads, tool results over 20k characters, cache rewrites over 100k tokens, the estimated and billed cost and the subagents' share of it, the most used shell commands and the most common shell errors
+- A **$** (Optimize spend) button, hotkey `o`, that scores this session and the past week from the usage stats below and asks Claude for suggestions. It looks at the share of tokens sent above 40% context, turns over 50 requests, shell calls per request, repeated reads by kind, tool results over 20k characters as the model read them (and by the tool's own record), cache rewrites over 100k tokens, the estimated and billed cost and the subagents' share of it, the most used shell commands and the most common shell errors
 
 Toasts warn about the patterns that cost the most:
 
@@ -46,7 +46,8 @@ The bar also records how each session uses tokens, for a later spend review. It 
 
 - each model request: model, effort, main thread or subagent, input, output, cache read and cache write tokens, its estimated cost at list prices, the idle gap before it, and context %
 - the session's billed total as it grows, so the spend review can set the estimate beside what was billed
-- each tool call: tool name, result size (and the size sent after trimming), error or denied, and a hash of the file path (to spot repeated reads)
+- each tool call: tool name, result size (the tool's own record, and the size sent after trimming), the size the model read (`seenBytes`: core's model-facing text, so an Edit's or Write's copy of the whole file is not counted), error or denied, and a hash of the file path (to spot repeated reads)
+- each Read of a file read before in the session, why it repeats (`repeat`): `exact` (the same agent re-read lines it already had, file unchanged), `new-range` (lines it had not read yet), `after-change` (an Edit, Write, MultiEdit or NotebookEdit changed the file since), `after-compact` (its context was compacted since) or `cross-agent` (another agent read it; agents do not share context). Changes made through a shell command are not seen. The older `repeatedReads` count, any Read of a path read before, is kept as it was so earlier audits still compare
 - each shell call: the first word of the command (`git`, `gh`, `dotnet`, `npm`, ...) and, when it fails, the first 100 characters of its error text
 - compactions (trigger, size before and after), subagents spawned, skills run, and the tools and MCP servers loaded at session start
 
