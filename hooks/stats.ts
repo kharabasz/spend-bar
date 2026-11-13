@@ -33,6 +33,25 @@ type StepResult = { usage: TurnUsage | null; toolUses: readonly { name: string }
 
 export type StepStart = { previous: number | null; startedAt: number }
 
+// Why a Read named a file this session had read before:
+// - exact: the same agent re-read lines it had already read, file unchanged, no compaction since;
+// - new-range: the same agent read lines it had not read yet (paging through a file by offset/limit);
+// - after-change: an Edit, Write, MultiEdit or NotebookEdit changed the file since this agent read it;
+// - after-compact: this agent's context was compacted since it read the file;
+// - cross-agent: another agent (the main thread or a subagent) read it, but not this one, and
+//   agents do not share context.
+// Changes made through a shell command are not seen, so they count as exact or new-range.
+export type RepeatKind = 'exact' | 'new-range' | 'after-change' | 'after-compact' | 'cross-agent'
+
+type ReadSeen = { spans: [number, number][]; pages: Set<string>; changes: number; compactions: number }
+
+// Tools that change files; their record holds the whole file, which the model never reads back.
+export const CHANGES_FILES = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+const FILE_RECORD_FIELDS = ['originalFile', 'content', 'structuredPatch', 'gitDiff']
+// The Read tool's default: 2000 lines from the start.
+const READ_DEFAULT_LIMIT = 2000
+const MAIN_AGENT = 'main'
+
 let isEnabled = false
 let ttlMs = 60 * MINUTE
 let configuredDir = ''
@@ -45,6 +64,9 @@ let billedUsd: number | null = null
 let flushing: Promise<void> = Promise.resolve()
 let hasLoggedFailure = false
 const readPaths = new Set<string>()
+const readsByPath = new Map<string, Map<string, ReadSeen>>()
+const changesByPath = new Map<string, number>()
+const compactionsByAgent = new Map<string, number>()
 const skillSeenAt = new Map<string, number>()
 let compactRecordedAt: number | null = null
 
@@ -134,6 +156,74 @@ export function errorTextOf(result: ToolCallResult): string {
 function filePathOf(input: object): string | undefined {
   const path = (input as { file_path?: unknown }).file_path
   return typeof path === 'string' ? path : undefined
+}
+
+function changedPathOf(input: { tool: string }): string | undefined {
+  if (!CHANGES_FILES.has(input.tool)) return undefined
+  const notebook = (input as { notebook_path?: unknown }).notebook_path
+  return filePathOf(input) ?? (typeof notebook === 'string' ? notebook : undefined)
+}
+
+// How many characters the model read: core's `text` (the result as the model reads it) plus any
+// reminder after it. A hook's own result (spend-bar's trimmed shell output) has no `text`, so its
+// size counts; a file-changing tool without `text` counts without the file copies in its record.
+export function seenSizeOf(tool: string, answer: ToolCallResult): number {
+  if (typeof answer.deny === 'string') return answer.deny.length
+  const context = ((answer as { context?: readonly string[] }).context ?? []).reduce((sum, text) => sum + text.length, 0)
+  if (typeof answer.text === 'string') return answer.text.length + context
+  const value = answer.result
+  if (CHANGES_FILES.has(tool) && typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const rest: Record<string, unknown> = { ...(value as Record<string, unknown>) }
+    for (const field of FILE_RECORD_FIELDS) delete rest[field]
+    return sizeOf(rest) + context
+  }
+  return sizeOf(value) + context
+}
+
+function isCovered(spans: readonly [number, number][], start: number, end: number): boolean {
+  let reached = start
+  for (const [from, to] of [...spans].sort((a, b) => a[0] - b[0])) {
+    if (from > reached) break
+    reached = Math.max(reached, to)
+    if (reached >= end) return true
+  }
+  return reached >= end
+}
+
+// The kind of repeat a successful Read is, or null for the session's first read of the file.
+function classifyRead(pathHash: string, agent: string, input: object): RepeatKind | null {
+  const { offset, limit, pages } = input as { offset?: unknown; limit?: unknown; pages?: unknown }
+  const start = Math.max(typeof offset === 'number' ? offset : 1, 1)
+  const end = start + (typeof limit === 'number' && limit > 0 ? limit : READ_DEFAULT_LIMIT)
+  const page = typeof pages === 'string' && pages ? pages : null
+  const changes = changesByPath.get(pathHash) ?? 0
+  const compactions = compactionsByAgent.get(agent) ?? 0
+  const byAgent = readsByPath.get(pathHash) ?? new Map<string, ReadSeen>()
+  readsByPath.set(pathHash, byAgent)
+  const seen = byAgent.get(agent)
+  const now: ReadSeen = { spans: [], pages: new Set(), changes, compactions }
+  let kind: RepeatKind | null
+  if (!seen) {
+    kind = byAgent.size === 0 ? null : 'cross-agent'
+  } else if (seen.changes !== changes) {
+    kind = 'after-change'
+  } else if (seen.compactions !== compactions) {
+    kind = 'after-compact'
+  } else {
+    const isSeen = page === null ? isCovered(seen.spans, start, end) : seen.pages.has(page)
+    kind = isSeen ? 'exact' : 'new-range'
+    now.spans = seen.spans
+    now.pages = seen.pages
+  }
+  if (page === null) now.spans.push([start, end])
+  else now.pages.add(page)
+  byAgent.set(agent, now)
+  return kind
+}
+
+function countCompaction(agent: string | null | undefined) {
+  const key = agent ?? MAIN_AGENT
+  compactionsByAgent.set(key, (compactionsByAgent.get(key) ?? 0) + 1)
 }
 
 function record(line: Line, counts: (day: Counts) => void) {
@@ -283,6 +373,9 @@ export async function statsSessionStarted($: EngineInterface, surface: string | 
   if (!isEnabled) return
   try {
     readPaths.clear()
+    readsByPath.clear()
+    changesByPath.clear()
+    compactionsByAgent.clear()
     skillSeenAt.clear()
     compactRecordedAt = null
     // The baseline: a resumed session has cost this much already, none of it this session's growth.
@@ -402,6 +495,7 @@ export async function statsCompacted($: EngineInterface, e: SessionCompactInput,
   if (!isEnabled) return
   const t = await $.clock.now()
   compactRecordedAt = t
+  countCompaction(e.agentId)
   record(
     {
       t,
@@ -439,6 +533,7 @@ async function drainCompactions($: EngineInterface) {
       if (compactRecordedAt !== null && Math.abs(t - compactRecordedAt) < SAME_COMPACTION_MS) continue
       const trigger = parsed.trigger === 'manual' || parsed.trigger === 'auto' ? parsed.trigger : 'unknown'
       const agent = typeof parsed.agent === 'string' ? parsed.agent : null
+      countCompaction(agent)
       record({ t, kind: 'compact', trigger, agent, tokensBefore: null, tokensAfter: null, via: 'hook' }, day =>
         add(day, ['compactions'], trigger, 1),
       )
@@ -481,6 +576,15 @@ export function hookStats(on: On) {
     const err = cmd !== null && isError ? errorTextOf(result) : null
     const sentBytes = answer === result ? bytes : sizeOf(answer.result)
     const isTrimmed = sentBytes !== bytes
+    const seenBytes = seenSizeOf(e.tool, answer)
+    const agent = e.agentId ?? MAIN_AGENT
+    // Only a read the model got counts toward the repeat kinds; a denied or failed one showed no lines.
+    const repeat = isRead && !isDenied && !isError ? classifyRead(pathHash, agent, e) : null
+    const changed = isDenied || isError ? undefined : changedPathOf(e)
+    if (changed !== undefined) {
+      const changedHash = hashPath(changed)
+      changesByPath.set(changedHash, (changesByPath.get(changedHash) ?? 0) + 1)
+    }
     record(
       {
         t: at,
@@ -489,17 +593,21 @@ export function hookStats(on: On) {
         agent: e.agentId ?? null,
         bytes,
         ...(isTrimmed ? { sentBytes } : {}),
+        seenBytes,
         isError,
         isDenied,
         path: pathHash ?? null,
+        ...(repeat !== null ? { repeat } : {}),
         ...(cmd !== null ? { cmd } : {}),
         ...(err !== null ? { err } : {}),
       },
       day => {
         add(day, ['tools', e.tool], 'calls', 1)
         add(day, ['tools', e.tool], 'bytes', bytes)
+        add(day, ['tools', e.tool], 'seenBytes', seenBytes)
         if (isError) add(day, ['tools', e.tool], 'errors', 1)
         if (isRepeatRead) add(day, [], 'repeatedReads', 1)
+        if (repeat !== null) add(day, ['repeatedReadsByKind'], repeat, 1)
         if (isTrimmed) {
           add(day, ['trimmed'], 'calls', 1)
           add(day, ['trimmed'], 'bytesSaved', bytes - sentBytes)

@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
-import { dayOf, flushStats, isCollectingStats, statsLocation, statsSessionId } from './stats'
-import type { Line } from './stats'
+import { CHANGES_FILES, dayOf, flushStats, isCollectingStats, statsLocation, statsSessionId } from './stats'
+import type { Line, RepeatKind } from './stats'
 import { dollars } from './pricing'
 
 const DAY = 24 * 60 * 60_000
@@ -28,9 +28,19 @@ export type Score = {
   longTurnRequests: number
   shellCalls: number
   reads: number
+  // Reads of a path already read in the session, any agent, denied and failed reads included.
   repeatedReads: number
+  // The same repeats by kind (RepeatKind); 'denied or failed' and, for logs from before 0.7.0,
+  // 'unclassified' hold the rest.
+  repeatsByKind: Tally
+  // Over 20k characters by the tool's own record (Edit's and Write's hold the whole file).
   largeResults: number
   largeResultsByTool: Tally
+  // Over 20k characters as the model read them.
+  seenLargeResults: number
+  seenLargeByTool: Tally
+  // Edit/Write results over 20k by record in logs from before 0.7.0, whose read size is unknown.
+  unmeasuredLarge: number
   bigRewrites: number
   bigRewriteTokens: number
   trimmedCalls: number
@@ -71,8 +81,12 @@ export function scoreLines(lines: readonly Line[]): Score {
     shellCalls: 0,
     reads: 0,
     repeatedReads: 0,
+    repeatsByKind: {},
     largeResults: 0,
     largeResultsByTool: {},
+    seenLargeResults: 0,
+    seenLargeByTool: {},
+    unmeasuredLarge: 0,
     bigRewrites: 0,
     bigRewriteTokens: 0,
     trimmedCalls: 0,
@@ -106,15 +120,40 @@ export function scoreLines(lines: readonly Line[]): Score {
     } else if (line.kind === 'tool') {
       const tool = String(line.tool)
       if (tool === 'Bash' || tool === 'PowerShell') score.shellCalls++
+      // 0.7.0 and later record seenBytes on every tool line, and a repeat kind on repeated reads.
+      const isMeasured = typeof line.seenBytes === 'number'
       if (tool === 'Read' && typeof line.path === 'string') {
         score.reads++
         const key = `${String(line.sid)}:${line.path}`
-        if (readPaths.has(key)) score.repeatedReads++
+        if (readPaths.has(key)) {
+          score.repeatedReads++
+          const kind = !isMeasured
+            ? 'unclassified'
+            : typeof line.repeat === 'string'
+              ? line.repeat
+              : line.isDenied === true || line.isError === true
+                ? 'denied or failed'
+                : 'unclassified'
+          bump(score.repeatsByKind, kind)
+        }
         readPaths.add(key)
       }
       if (numberOf(line.bytes) > LARGE_RESULT_BYTES) {
         score.largeResults++
         bump(score.largeResultsByTool, tool)
+      }
+      const seen = isMeasured
+        ? numberOf(line.seenBytes)
+        : CHANGES_FILES.has(tool)
+          ? null
+          : typeof line.sentBytes === 'number'
+            ? line.sentBytes
+            : numberOf(line.bytes)
+      if (seen === null) {
+        if (numberOf(line.bytes) > LARGE_RESULT_BYTES) score.unmeasuredLarge++
+      } else if (seen > LARGE_RESULT_BYTES) {
+        score.seenLargeResults++
+        bump(score.seenLargeByTool, tool)
       }
       if (typeof line.sentBytes === 'number') score.trimmedCalls++
       if (typeof line.cmd === 'string') {
@@ -151,18 +190,49 @@ function top(tally: Tally, count: number): [string, number][] {
     .slice(0, count)
 }
 
-export function describeScore(score: Score): string {
-  if (score.requests === 0) return 'no logged requests'
-  const largeBy = top(score.largeResultsByTool, 3)
+const REPEAT_LABELS: [RepeatKind | 'denied or failed' | 'unclassified', string][] = [
+  ['exact', 're-read lines the same agent had already read, file unchanged'],
+  ['new-range', 'read lines the same agent had not read yet'],
+  ['after-change', 'after an Edit or Write changed the file'],
+  ['after-compact', 'after a compaction'],
+  ['cross-agent', 'by another agent (agents do not share context)'],
+  ['denied or failed', 'denied or failed'],
+  ['unclassified', 'from logs before kinds were recorded'],
+]
+
+function describeRepeats(score: Score): string {
+  const parts = REPEAT_LABELS.filter(([kind]) => (score.repeatsByKind[kind] ?? 0) > 0).map(
+    ([kind, label]) => `${score.repeatsByKind[kind]} ${label}`,
+  )
+  return `${score.repeatedReads} of ${score.reads} reads named a file read earlier in the session${parts.length ? ` (${parts.join('; ')})` : ''}`
+}
+
+function byTool(tally: Tally): string {
+  return top(tally, 3)
     .map(([tool, n]) => `${tool} ${n}`)
     .join(', ')
+}
+
+function describeLarge(score: Score): string {
+  const seenBy = byTool(score.seenLargeByTool)
+  const recordBy = byTool(score.largeResultsByTool)
+  const unmeasured = score.unmeasuredLarge > 0 ? `, ${score.unmeasuredLarge} older Edit/Write results not measured as read` : ''
+  return (
+    `${score.seenLargeResults} tool results over ${compact(LARGE_RESULT_BYTES)} chars as the model read them${seenBy ? ` (${seenBy})` : ''}, ` +
+    `${score.trimmedCalls} trimmed by spend-bar; ${score.largeResults} over ${compact(LARGE_RESULT_BYTES)} by the tool's own record${recordBy ? ` (${recordBy})` : ''}, ` +
+    `which for Edit and Write holds the whole file and is not what the model reads${unmeasured}`
+  )
+}
+
+export function describeScore(score: Score): string {
+  if (score.requests === 0) return 'no logged requests'
   return [
     `${score.requests} requests costing about ${dollars(score.usd)} at list prices (${percent(score.subagentUsd, score.usd)} in subagents), ${compact(score.sentTokens)} tokens sent, ${compact(score.outputTokens)} output`,
     `${percent(score.sentAboveContext, score.sentAtKnownContext)} of main-thread tokens sent above ${HIGH_CONTEXT_PERCENT}% context`,
     `${score.longTurns} of ${score.turns} turns over ${LONG_TURN_REQUESTS} requests (${score.longTurnRequests} requests in them)`,
     `${(score.shellCalls / score.requests).toFixed(2)} shell calls per request`,
-    `${score.repeatedReads} of ${score.reads} reads repeated`,
-    `${score.largeResults} tool results over ${compact(LARGE_RESULT_BYTES)} chars${largeBy ? ` (${largeBy})` : ''}, ${score.trimmedCalls} trimmed`,
+    describeRepeats(score),
+    describeLarge(score),
     `${score.bigRewrites} cache rewrites over ${compact(BIG_REWRITE_TOKENS)} tokens (${compact(score.bigRewriteTokens)} tokens)`,
   ].join('; ')
 }

@@ -279,6 +279,39 @@ test('the score counts each spend pattern', () => {
   expect(prompt).toContain('2 cache rewrites after the cache expired (300k tokens')
 })
 
+test('the score sorts repeats by kind and counts large results as the model read them', () => {
+  const step = { t: 0, kind: 'step', sid: 's', turn: 't', agent: null, ctx: 10, in: 1, out: 1, cacheRead: 0, cacheWrite: 0 }
+  const tool = (name: string, extra: Record<string, unknown> = {}) => ({ t: 0, kind: 'tool', sid: 's', tool: name, bytes: 10, ...extra })
+  const lines = [
+    step,
+    // From 0.7.0: seenBytes on every tool line, a repeat kind on repeated reads.
+    tool('Read', { path: 'a', seenBytes: 10 }),
+    tool('Read', { path: 'a', seenBytes: 10, repeat: 'new-range' }),
+    tool('Read', { path: 'a', seenBytes: 10, repeat: 'cross-agent', agent: 'sub' }),
+    tool('Read', { path: 'a', seenBytes: 30, isDenied: true, bytes: 0 }),
+    tool('Edit', { path: 'a', bytes: 200_000, seenBytes: 60 }),
+    tool('Read', { path: 'c', bytes: 40_000, seenBytes: 41_000 }),
+    // Before 0.7.0: no seenBytes, no kind.
+    tool('Read', { path: 'b' }),
+    tool('Read', { path: 'b' }),
+    tool('Edit', { path: 'b', bytes: 90_000 }),
+    tool('Bash', { cmd: 'git', bytes: 30_000, sentBytes: 10_000 }),
+  ]
+
+  const score = scoreLines(lines)
+  expect(score.repeatedReads).toBe(4)
+  expect(score.repeatsByKind).toEqual({ 'new-range': 1, 'cross-agent': 1, 'denied or failed': 1, unclassified: 1 })
+  expect(score.largeResultsByTool).toEqual({ Edit: 2, Read: 1, Bash: 1 })
+  expect(score.seenLargeByTool).toEqual({ Read: 1 })
+  expect(score.unmeasuredLarge).toBe(1)
+
+  const prompt = buildPrompt(score, score, [])
+  expect(prompt).toContain('4 of 7 reads named a file read earlier in the session (1 read lines the same agent had not read yet;')
+  expect(prompt).toContain('1 tool results over 20k chars as the model read them (Read 1)')
+  expect(prompt).toContain('4 over 20k by the tool\'s own record')
+  expect(prompt).toContain('1 older Edit/Write results not measured as read')
+})
+
 test('Optimize spend scores the session and the week, then asks Claude', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const { files, store, prompts } = machine(on)

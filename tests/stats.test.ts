@@ -136,6 +136,56 @@ test('a turn is logged as JSONL lines and added to the day total', async ($, on)
   expect(totals.repeatedReads).toBe(1)
 })
 
+test('tool lines record what the model read and why a read repeats', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, store } = machine(on)
+  const whole = 'x'.repeat(250_000)
+  on('tool.call', (_, e) => {
+    if (e.tool === 'Edit') {
+      return {
+        result: { filePath: 'C:\\repo\\a.ts', oldString: 'a', newString: 'b', originalFile: whole, structuredPatch: [], userModified: false, replaceAll: false },
+        text: 'The file C:\\repo\\a.ts has been updated successfully.',
+      }
+    }
+    const input = e as { file_path?: string; limit?: number }
+    if (input.file_path?.endsWith('b.ts') && input.limit === undefined) return { deny: 'b.ts is too big; read a range' }
+    return { result: { type: 'text', file: { content: 'line' } }, text: '1\tline' }
+  })
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\a.ts' })
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\a.ts', offset: 10, limit: 100 })
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\a.ts', offset: 2500, limit: 100 })
+  await $.tool.call({ tool: 'Edit', file_path: 'C:\\repo\\a.ts', old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\a.ts', offset: 10, limit: 100 })
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\a.ts', agentId: 'sub-1' } as never)
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\b.ts' })
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\b.ts', limit: 50 })
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  const tools = files
+    .get(`${EVENTS}\\${TODAY}\\sess-1.jsonl`)!
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+    .filter(line => line.kind === 'tool')
+  expect(tools.map(line => line.repeat ?? null)).toEqual([null, 'exact', 'new-range', null, 'after-change', 'cross-agent', null, null])
+  const edit = tools[3]
+  expect(edit.bytes).toBeGreaterThan(250_000)
+  expect(edit.seenBytes).toBe('The file C:\\repo\\a.ts has been updated successfully.'.length)
+  expect(tools[0].seenBytes).toBe('1\tline'.length)
+  expect(tools[6].isDenied).toBe(true)
+  expect(tools[6].seenBytes).toBe('b.ts is too big; read a range'.length)
+
+  const totals = store.get(`day:${TODAY}`) as Record<string, any>
+  // The old count is kept as it was: any Read of a path read before, the denied one included.
+  expect(totals.repeatedReads).toBe(5)
+  expect(totals.repeatedReadsByKind).toEqual({ exact: 1, 'new-range': 1, 'after-change': 1, 'cross-agent': 1 })
+  expect(totals.tools.Edit.seenBytes).toBe(edit.seenBytes)
+})
+
 test('day folders and totals older than 30 days are removed at session start', async ($, on) => {
   mock.clock(on, { now: NOW })
   const { files, store, removed, logs } = machine(on)
