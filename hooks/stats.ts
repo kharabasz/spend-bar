@@ -623,21 +623,26 @@ export function hookStats(on: On) {
   })
 
   on('agent.spawn', async ($, e, next) => {
-    if (isEnabled) {
-      record(
-        {
-          t: await $.clock.now(),
-          kind: 'agent',
-          type: e.subagentType,
-          model: e.model ?? e.parentModel,
-          isBackground: e.background,
-          isFork: e.fork,
-        },
-        day => add(day, ['agents'], e.subagentType, 1),
-      )
-    }
+    if (!isEnabled) return next(e)
+    const t = await $.clock.now()
+    const result = await next(e)
+    const isStarted = result.deny === undefined
+    record(
+      {
+        t,
+        kind: 'agent',
+        type: e.subagentType,
+        model: isStarted ? result.model : null,
+        requestedModel: e.model ?? null,
+        agentId: isStarted ? (result.agentId ?? null) : null,
+        isBackground: e.background,
+        isFork: e.fork,
+        ...(isStarted ? {} : { isDenied: true }),
+      },
+      day => add(day, ['agents'], e.subagentType, 1),
+    )
 
-    return next(e)
+    return result
   })
 
   on('skill.prompt', async ($, e, next) => {
