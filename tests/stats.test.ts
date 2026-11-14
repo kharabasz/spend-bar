@@ -186,6 +186,30 @@ test('tool lines record what the model read and why a read repeats', async ($, o
   expect(totals.tools.Edit.seenBytes).toBe(edit.seenBytes)
 })
 
+test('a spawn line names the started agent and the model it runs on, not the one the call asked for', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, store } = machine(on)
+  on('agent.spawn', (_, e) => (e.description === 'refused' ? { deny: 'no' } : { model: 'claude-sonnet-5-5', agentId: 'agent-7' }))
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.agent.spawn({ prompt: 'implement it', subagentType: 'claudalisk:implementer', model: 'opus', description: 'implement' })
+  await $.agent.spawn({ prompt: 'x', subagentType: 'general-purpose', description: 'refused' }).catch(() => null)
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  const agents = files
+    .get(`${EVENTS}\\${TODAY}\\sess-1.jsonl`)!
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+    .filter(line => line.kind === 'agent')
+  expect(agents[0]).toMatchObject({ type: 'claudalisk:implementer', agentId: 'agent-7', model: 'claude-sonnet-5-5', requestedModel: 'opus' })
+  expect(agents[1]).toMatchObject({ type: 'general-purpose', agentId: null, model: null, requestedModel: null, isDenied: true })
+  const totals = store.get(`day:${TODAY}`) as Record<string, any>
+  expect(totals.agents).toEqual({ 'claudalisk:implementer': 1, 'general-purpose': 1 })
+})
+
 test('day folders and totals older than 30 days are removed at session start', async ($, on) => {
   mock.clock(on, { now: NOW })
   const { files, store, removed, logs } = machine(on)

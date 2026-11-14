@@ -47,7 +47,13 @@ export type Score = {
   commands: Tally
   commandErrors: Tally
   errors: Tally
+  agentTypes: Record<string, AgentTypeSpend>
 }
+
+export type AgentTypeSpend = { runs: number; requests: number; usd: number; usdByModel: Tally }
+
+const UNMATCHED_AGENT = 'unmatched'
+const TOP_AGENT_TYPES = 5
 
 export type DayTotals = {
   estimatedUsd?: number
@@ -93,16 +99,36 @@ export function scoreLines(lines: readonly Line[]): Score {
     commands: {},
     commandErrors: {},
     errors: {},
+    agentTypes: {},
   }
   const turnRequests = new Map<string, number>()
   const readPaths = new Set<string>()
+  const typeOfAgent = new Map<string, string>()
+  const runsSeen = new Set<string>()
+  for (const line of lines) {
+    if (line.kind === 'agent' && typeof line.agentId === 'string' && typeof line.type === 'string') {
+      typeOfAgent.set(`${String(line.sid)}:${line.agentId}`, line.type)
+    }
+  }
 
   for (const line of lines) {
     if (line.kind === 'step') {
       const sent = numberOf(line.in) + numberOf(line.cacheRead) + numberOf(line.cacheWrite)
       score.requests++
       score.usd += numberOf(line.usd)
-      if (line.agent != null) score.subagentUsd += numberOf(line.usd)
+      if (line.agent != null) {
+        score.subagentUsd += numberOf(line.usd)
+        const run = `${String(line.sid)}:${String(line.agent)}`
+        const type = typeOfAgent.get(run) ?? UNMATCHED_AGENT
+        const spend = (score.agentTypes[type] ??= { runs: 0, requests: 0, usd: 0, usdByModel: {} })
+        if (!runsSeen.has(run)) {
+          runsSeen.add(run)
+          spend.runs++
+        }
+        spend.requests++
+        spend.usd += numberOf(line.usd)
+        bump(spend.usdByModel, String(line.model ?? 'unknown'), numberOf(line.usd))
+      }
       score.sentTokens += sent
       score.outputTokens += numberOf(line.out)
       if (numberOf(line.cacheWrite) > BIG_REWRITE_TOKENS) {
@@ -224,10 +250,30 @@ function describeLarge(score: Score): string {
   )
 }
 
+function shortModel(model: string): string {
+  return model.replace(/^claude-/, '')
+}
+
+export function describeAgentTypes(score: Score): string {
+  const types = Object.entries(score.agentTypes)
+    .sort((a, b) => b[1].usd - a[1].usd)
+    .slice(0, TOP_AGENT_TYPES)
+  if (types.length === 0) return 'no subagent requests'
+  const described = types.map(([type, spend]) => {
+    const models = top(spend.usdByModel, 3)
+      .map(([model, usd]) => `${shortModel(model)} ${dollars(usd)}`)
+      .join(', ')
+    const label = type === UNMATCHED_AGENT ? 'agents not matched to a type (logs before 0.8.0)' : type
+    return `${label} ${dollars(spend.usd)} in ${spend.runs} runs and ${spend.requests} requests (${models})`
+  })
+  return `subagent spend by agent type: ${described.join('; ')}`
+}
+
 export function describeScore(score: Score): string {
   if (score.requests === 0) return 'no logged requests'
   return [
     `${score.requests} requests costing about ${dollars(score.usd)} at list prices (${percent(score.subagentUsd, score.usd)} in subagents), ${compact(score.sentTokens)} tokens sent, ${compact(score.outputTokens)} output`,
+    describeAgentTypes(score),
     `${percent(score.sentAboveContext, score.sentAtKnownContext)} of main-thread tokens sent above ${HIGH_CONTEXT_PERCENT}% context`,
     `${score.longTurns} of ${score.turns} turns over ${LONG_TURN_REQUESTS} requests (${score.longTurnRequests} requests in them)`,
     `${(score.shellCalls / score.requests).toFixed(2)} shell calls per request`,
@@ -275,7 +321,7 @@ export function buildPrompt(session: Score, week: Score, days: readonly DayTotal
   return [
     'Spend review from the spend-bar mod. From these numbers, suggest the three to five changes to how I work with Claude Code',
     '(habits, settings, CLAUDE.md rules, hooks or scripts) that would cut token spend the most, biggest saving first, in under 250 words.',
-    'Do not run tools or change files; just answer.',
+    'Do not run tools or change files; just answer. Base each suggestion on a number below and name it; where the numbers cannot show the cause, say so instead of guessing.',
     '',
     `This session: ${describeScore(session)}.`,
     `Past ${WEEK_DAYS} days: ${describeScore(week)}; ${describeTotals(days)}.`,
@@ -323,6 +369,7 @@ export function buildWeeklyPrompt(
     'Weekly spend review from the spend-bar mod. Compare this week with the one before and tell me, in under 300 words:',
     'what changed and why it likely did, the three to five habits, settings, CLAUDE.md rules, hooks or scripts that would cut the most, biggest saving first,',
     'and one number to watch next week. Do not run tools or change files; just answer.',
+    'Base each suggestion on a number below and name it; where the numbers cannot show the cause, say so instead of guessing.',
     '',
     `This week (last ${WEEK_DAYS} days): ${describeScore(week)}; ${describeTotals(totals)}.`,
     `The week before: ${describeScore(prior)}.`,

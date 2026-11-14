@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
 import { buildPrompt, buildWeeklyPrompt, scoreLines, usdByDay } from '../hooks/optimize'
+import { costOf } from '../hooks/pricing'
 import { firstWord } from '../hooks/stats'
 
 const BAND = {
@@ -310,6 +311,52 @@ test('the score sorts repeats by kind and counts large results as the model read
   expect(prompt).toContain('1 tool results over 20k chars as the model read them (Read 1)')
   expect(prompt).toContain('4 over 20k by the tool\'s own record')
   expect(prompt).toContain('1 older Edit/Write results not measured as read')
+})
+
+test('cache reads on Sonnet 5.5 cost a twentieth of input, and Haiku 5.5 prompts over 100k cost the higher rate', () => {
+  const usage = (model: string, cacheRead: number) => ({
+    model,
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: 0,
+  })
+  const near = (actual: number | null, expected: number) => expect(actual !== null && Math.abs(actual - expected) < 1e-12).toBe(true)
+  near(costOf(usage('claude-sonnet-5-5', 1_000_000), false), 0.1)
+  near(costOf(usage('claude-opus-5-5', 1_000_000), false), 0.2)
+  near(costOf(usage('claude-haiku-5-5', 100_000), false), 0.001)
+  near(costOf(usage('claude-haiku-5-5', 100_001), false), 0.00500005)
+})
+
+test('the score splits subagent spend by agent type through the spawn line', () => {
+  const step = (agent: string, model: string, usd: number, sid = 's') => ({ t: 0, kind: 'step', sid, turn: 't', agent, model, usd, in: 1, out: 1, cacheRead: 0, cacheWrite: 0 })
+  const lines = [
+    { t: 0, kind: 'agent', sid: 's', type: 'claudalisk:implementer', agentId: 'a1', model: 'claude-sonnet-5-5' },
+    { t: 0, kind: 'agent', sid: 's', type: 'general-purpose', agentId: 'a2', model: 'claude-opus-5-5' },
+    { t: 0, kind: 'agent', sid: 's', type: 'general-purpose', agentId: 'a3', model: 'claude-sonnet-5-5' },
+    step('a1', 'claude-sonnet-5-5', 1),
+    step('a1', 'claude-sonnet-5-5', 1),
+    step('a2', 'claude-opus-5-5', 3),
+    step('a3', 'claude-sonnet-5-5', 0.5),
+    step('a1', 'claude-opus-5-5', 0.25, 'other'),
+  ]
+
+  const score = scoreLines(lines)
+  expect(score.agentTypes['claudalisk:implementer']).toEqual({ runs: 1, requests: 2, usd: 2, usdByModel: { 'claude-sonnet-5-5': 2 } })
+  expect(score.agentTypes['general-purpose']).toEqual({
+    runs: 2,
+    requests: 2,
+    usd: 3.5,
+    usdByModel: { 'claude-opus-5-5': 3, 'claude-sonnet-5-5': 0.5 },
+  })
+  expect(score.agentTypes.unmatched).toEqual({ runs: 1, requests: 1, usd: 0.25, usdByModel: { 'claude-opus-5-5': 0.25 } })
+
+  const prompt = buildPrompt(score, score, [])
+  expect(prompt).toContain(
+    'subagent spend by agent type: general-purpose $3.50 in 2 runs and 2 requests (opus-5-5 $3.00, sonnet-5-5 $0.50); claudalisk:implementer $2.00 in 1 runs and 2 requests (sonnet-5-5 $2.00)',
+  )
+  expect(prompt).toContain('agents not matched to a type (logs before 0.8.0) $0.25')
+  expect(prompt).toContain('say so instead of guessing')
 })
 
 test('Optimize spend scores the session and the week, then asks Claude', async ($, on) => {
