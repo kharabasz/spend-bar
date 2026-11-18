@@ -11,6 +11,7 @@ import {
   statsCompacted,
   statsCost,
   statsMeasured,
+  statsOverhead,
   statsSessionStarted,
   statsStepEnded,
   statsLocation,
@@ -300,6 +301,7 @@ export const register: Register = (on, options) => {
     const started = await statsStepStarting($, e)
     const result = yield* next(e)
     statsStepEnded(e, result, started)
+    await statsOverhead($, e, result)
     if (e.agentId === undefined) {
       const written = result.usage?.cache_creation_input_tokens ?? 0
       const gapMs = started.previous === null ? null : started.startedAt - started.previous

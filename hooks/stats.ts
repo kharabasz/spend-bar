@@ -1,5 +1,13 @@
 import { atom, read } from 'claude-code'
-import type { EngineInterface, Register, SessionCompactInput, SessionCompactResult, ToolCallResult, TurnUsage } from 'claude-code'
+import type {
+  EngineInterface,
+  Register,
+  SessionCompactInput,
+  SessionCompactResult,
+  SessionContextBreakdown,
+  ToolCallResult,
+  TurnUsage,
+} from 'claude-code'
 
 import { costOf } from './pricing'
 import { trimToolResult } from './trim'
@@ -69,6 +77,9 @@ const changesByPath = new Map<string, number>()
 const compactionsByAgent = new Map<string, number>()
 const skillSeenAt = new Map<string, number>()
 let compactRecordedAt: number | null = null
+let isOverheadRecorded = false
+const describedTools = new Map<string, { chars: number; isDeferred: boolean }>()
+const MESSAGES_ROW = /^messages$/i
 
 function pad(n: number): string {
   return String(n).padStart(2, '0')
@@ -378,6 +389,7 @@ export async function statsSessionStarted($: EngineInterface, surface: string | 
     compactionsByAgent.clear()
     skillSeenAt.clear()
     compactRecordedAt = null
+    isOverheadRecorded = false
     // The baseline: a resumed session has cost this much already, none of it this session's growth.
     billedUsd = (await $.session.usage()).cost?.usd ?? null
     const now = await $.clock.now()
@@ -467,6 +479,70 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
       }
     },
   )
+}
+
+export function fixedTokensOf(breakdown: SessionContextBreakdown): number {
+  return breakdown.categories
+    .filter(row => row.kind === 'used' && !MESSAGES_ROW.test(row.name))
+    .reduce((sum, row) => sum + row.tokens, 0)
+}
+
+type LoadedTool = { chars: number; deferred: boolean | null; tokens?: number }
+
+function loadedToolsOf(listed: readonly { name: string; description: string }[], breakdown: SessionContextBreakdown | null) {
+  const mcpByName = new Map((breakdown?.mcpTools ?? []).map(tool => [tool.name, tool]))
+  const tools: Record<string, LoadedTool> = {}
+  for (const tool of listed) {
+    const described = describedTools.get(tool.name)
+    const mcp = mcpByName.get(tool.name)
+    tools[tool.name] = {
+      chars: described?.chars ?? tool.description.length,
+      deferred: described?.isDeferred ?? (mcp ? !mcp.isLoaded : null),
+      ...(mcp ? { tokens: mcp.tokens } : {}),
+    }
+  }
+  return tools
+}
+
+export async function statsOverhead($: EngineInterface, e: StepInput, result: StepResult) {
+  const usage = result.usage
+  if (!isEnabled || isOverheadRecorded || e.agentId !== undefined || !usage) return
+  isOverheadRecorded = true
+  try {
+    const firstRequest = usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+    const breakdown = (await $.session.usage({ breakdown: 'summary' })).context.breakdown ?? null
+    const fixed = breakdown === null ? null : fixedTokensOf(breakdown)
+    const rows =
+      breakdown === null
+        ? null
+        : Object.fromEntries(
+            breakdown.categories
+              .filter(row => row.kind === 'used' && !MESSAGES_ROW.test(row.name))
+              .map(row => [row.name, row.tokens]),
+          )
+    const skills = breakdown?.skills ? Object.fromEntries(breakdown.skills.skillFrontmatter.map(skill => [skill.name, skill.tokens])) : null
+    record(
+      {
+        t: await $.clock.now(),
+        kind: 'overhead',
+        firstRequest,
+        fixed,
+        rows,
+        skills,
+        tools: loadedToolsOf(await $.tool.list(), breakdown),
+      },
+      day => {
+        add(day, ['overhead'], 'sessions', 1)
+        add(day, ['overhead'], 'firstRequestTokens', firstRequest)
+        if (fixed !== null) {
+          add(day, ['overhead'], 'measured', 1)
+          add(day, ['overhead'], 'fixedTokens', fixed)
+        }
+      },
+    )
+  } catch (error) {
+    fail($, 'measuring the fixed overhead', error)
+  }
 }
 
 // The engine's billed total (/cost) grows with each response; the day keeps what it grew by, so a
@@ -641,6 +717,13 @@ export function hookStats(on: On) {
       },
       day => add(day, ['agents'], e.subagentType, 1),
     )
+
+    return result
+  })
+
+  on('tool.describe', async ($, e, next) => {
+    const result = await next(e)
+    describedTools.set(e.tool, { chars: result.description.length, isDeferred: result.isDeferred ?? e.isDeferred === true })
 
     return result
   })

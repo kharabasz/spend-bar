@@ -48,7 +48,26 @@ export type Score = {
   commandErrors: Tally
   errors: Tally
   agentTypes: Record<string, AgentTypeSpend>
+  overhead: Overhead
 }
+
+export type Overhead = {
+  sessions: number
+  measured: number
+  fixedTokens: number
+  firstRequestTokens: number
+  mainSentTokens: number
+  resentFixedTokens: number
+  rows: Tally
+  loadedTools: Record<string, { sessions: number; tokens: number }>
+  listedSkills: Record<string, { sessions: number; tokens: number }>
+  toolCalls: Tally
+  skillRuns: Tally
+}
+
+const TOP_UNUSED = 8
+const CHARS_PER_TOKEN = 4
+const ALWAYS_USED_TOOLS = new Set(['ToolSearch'])
 
 export type AgentTypeSpend = { runs: number; requests: number; usd: number; usdByModel: Tally }
 
@@ -70,6 +89,33 @@ function numberOf(value: unknown): number {
 
 function bump(tally: Tally, key: string, amount = 1) {
   tally[key] = (tally[key] ?? 0) + amount
+}
+
+function entriesOf(value: unknown): [string, unknown][] {
+  return value && typeof value === 'object' ? Object.entries(value) : []
+}
+
+function tallyOverhead(overhead: Overhead, line: Line) {
+  overhead.sessions++
+  overhead.firstRequestTokens += numberOf(line.firstRequest)
+  if (typeof line.fixed === 'number') {
+    overhead.measured++
+    overhead.fixedTokens += line.fixed
+  }
+  for (const [row, tokens] of entriesOf(line.rows)) bump(overhead.rows, row, numberOf(tokens))
+  for (const [name, tool] of entriesOf(line.tools)) {
+    const { chars, deferred, tokens } = (tool ?? {}) as { chars?: unknown; deferred?: unknown; tokens?: unknown }
+    if (deferred === true) continue
+    const estimate = typeof tokens === 'number' ? tokens : Math.round(numberOf(chars) / CHARS_PER_TOKEN)
+    const loaded = (overhead.loadedTools[name] ??= { sessions: 0, tokens: 0 })
+    loaded.sessions++
+    loaded.tokens = Math.max(loaded.tokens, estimate)
+  }
+  for (const [name, tokens] of entriesOf(line.skills)) {
+    const listed = (overhead.listedSkills[name] ??= { sessions: 0, tokens: 0 })
+    listed.sessions++
+    listed.tokens = Math.max(listed.tokens, numberOf(tokens))
+  }
 }
 
 export function scoreLines(lines: readonly Line[]): Score {
@@ -100,6 +146,33 @@ export function scoreLines(lines: readonly Line[]): Score {
     commandErrors: {},
     errors: {},
     agentTypes: {},
+    overhead: {
+      sessions: 0,
+      measured: 0,
+      fixedTokens: 0,
+      firstRequestTokens: 0,
+      mainSentTokens: 0,
+      resentFixedTokens: 0,
+      rows: {},
+      loadedTools: {},
+      listedSkills: {},
+      toolCalls: {},
+      skillRuns: {},
+    },
+  }
+  const overhead = score.overhead
+  const fixedBySession = new Map<string, number>()
+  for (const line of lines) {
+    if (line.kind === 'overhead') {
+      tallyOverhead(overhead, line)
+      if (typeof line.fixed === 'number') fixedBySession.set(String(line.sid), line.fixed)
+    } else if (line.kind === 'tool') {
+      bump(overhead.toolCalls, String(line.tool))
+    } else if (line.kind === 'agent') {
+      bump(overhead.toolCalls, 'Agent')
+    } else if (line.kind === 'skill') {
+      bump(overhead.skillRuns, String(line.skill))
+    }
   }
   const turnRequests = new Map<string, number>()
   const readPaths = new Set<string>()
@@ -136,6 +209,11 @@ export function scoreLines(lines: readonly Line[]): Score {
         score.bigRewriteTokens += numberOf(line.cacheWrite)
       }
       if (line.agent == null) {
+        const fixed = fixedBySession.get(String(line.sid))
+        if (fixed !== undefined) {
+          overhead.mainSentTokens += sent
+          overhead.resentFixedTokens += Math.min(fixed, sent)
+        }
         if (typeof line.ctx === 'number') {
           score.sentAtKnownContext += sent
           if (line.ctx > HIGH_CONTEXT_PERCENT) score.sentAboveContext += sent
@@ -269,6 +347,41 @@ export function describeAgentTypes(score: Score): string {
   return `subagent spend by agent type: ${described.join('; ')}`
 }
 
+function unused(listed: Record<string, { tokens: number }>, used: Tally, skip: ReadonlySet<string> = new Set()): string {
+  return Object.entries(listed)
+    .filter(([name, entry]) => !skip.has(name) && (used[name] ?? 0) === 0 && entry.tokens > 0)
+    .sort((a, b) => b[1].tokens - a[1].tokens)
+    .slice(0, TOP_UNUSED)
+    .map(([name, entry]) => `${name} ~${compact(entry.tokens)}`)
+    .join(', ')
+}
+
+export function describeOverhead(overhead: Overhead): string {
+  if (overhead.sessions === 0) return 'Fixed overhead: not measured (no sessions logged by spend-bar 0.9.0 or later).'
+  const fixed =
+    overhead.measured > 0
+      ? `about ${compact(overhead.fixedTokens / overhead.measured)} tokens of system prompt, tool definitions, skill listing, memory files and agent descriptions per main-thread request`
+      : `first requests averaged ${compact(overhead.firstRequestTokens / overhead.sessions)} tokens`
+  const rows = top(overhead.rows, 6)
+    .map(([row, tokens]) => `${row} ${compact(tokens / Math.max(overhead.measured, 1))}`)
+    .join(', ')
+  const resent =
+    overhead.mainSentTokens > 0
+      ? `; that prefix was ${percent(overhead.resentFixedTokens, overhead.mainSentTokens)} of main-thread tokens sent (${compact(overhead.resentFixedTokens)}), mostly read from the prompt cache at the cache-read rate and written in full at each session start and cache expiry`
+      : ''
+  const tools = unused(overhead.loadedTools, overhead.toolCalls, ALWAYS_USED_TOOLS)
+  const skills = unused(overhead.listedSkills, overhead.skillRuns)
+  return [
+    `Fixed overhead over ${overhead.sessions} sessions: ${fixed}${rows ? ` (${rows})` : ''}${resent}.`,
+    `Tools loaded in full but never called in these logs, largest first (estimated tokens per request): ${tools || 'none'}.`,
+    `Skills listed but never run in these logs, largest first: ${skills || 'none'}.`,
+    'Tools behind ToolSearch (deferred) are left out: they cost only their name until loaded.',
+    'In settings.json, a bare tool name in permissions.deny removes that tool from every request (a scoped rule such as "Bash(rm *)" does not),',
+    'skillOverrides with "off" removes one skill from the listing and "user-invocable-only" keeps it as a slash command only, and disableBundledSkills drops every bundled skill.',
+    'Suggest these only for tools and skills I am unlikely to need, and say which you would keep.',
+  ].join('\n')
+}
+
 export function describeScore(score: Score): string {
   if (score.requests === 0) return 'no logged requests'
   return [
@@ -327,6 +440,7 @@ export function buildPrompt(session: Score, week: Score, days: readonly DayTotal
     `Past ${WEEK_DAYS} days: ${describeScore(week)}; ${describeTotals(days)}.`,
     `Top shell commands this week: ${commands || 'none'}.`,
     ...(errors ? [`Most common shell errors: ${errors}.`] : []),
+    describeOverhead(week.overhead),
   ].join('\n')
 }
 
@@ -377,6 +491,7 @@ export function buildWeeklyPrompt(
     `Estimated cost by day: ${dayCosts(byDay, days)}.`,
     `Top shell commands this week: ${commands || 'none'}.`,
     ...(errors ? [`Most common shell errors: ${errors}.`] : []),
+    describeOverhead(week.overhead),
   ].join('\n')
 }
 
