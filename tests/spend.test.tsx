@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { buildPrompt, buildWeeklyPrompt, scoreLines, usdByDay } from '../hooks/optimize'
+import { buildPrompt, buildWeeklyPrompt, describeOverhead, scoreLines, usdByDay } from '../hooks/optimize'
 import { costOf } from '../hooks/pricing'
 import { firstWord } from '../hooks/stats'
 
@@ -484,4 +484,57 @@ test('the weekly review compares this week with the one before', () => {
   expect(prompt).toContain('Weekly spend review')
   expect(prompt).toContain('+150%')
   expect(prompt).toContain('11-06 $5')
+})
+
+test('the review names the fixed overhead and the loaded tools and skills that were never used', () => {
+  const overhead = (sid: string, fixed: number | null) => ({
+    t: 0,
+    kind: 'overhead',
+    sid,
+    firstRequest: 20_000,
+    fixed,
+    rows: fixed === null ? null : { 'System tools': 12_000, Skills: 3_000 },
+    skills: { commit: 100, deploy: 2_000, review: 900 },
+    tools: {
+      Read: { chars: 2_000, deferred: false },
+      Workflow: { chars: 20_000, deferred: false },
+      Artifact: { chars: 16_000, deferred: null },
+      CronCreate: { chars: 9_000, deferred: true },
+      ToolSearch: { chars: 3_000, deferred: false },
+      mcp__linear__create: { chars: 0, deferred: false, tokens: 1_500 },
+      mcp__github__search: { chars: 0, deferred: false, tokens: 900 },
+    },
+  })
+  const step = (sid: string, sent: number, agent: string | null = null) => ({ t: 0, kind: 'step', sid, turn: 't', agent, model: 'claude-opus-5-5', usd: 0, in: 0, out: 1, cacheRead: sent, cacheWrite: 0 })
+  const lines = [
+    overhead('a', 15_000),
+    overhead('b', null),
+    step('a', 20_000),
+    step('a', 30_000),
+    step('a', 10_000, 'sub-1'),
+    step('b', 25_000),
+    { t: 0, kind: 'tool', sid: 'a', tool: 'Read', bytes: 1, seenBytes: 1 },
+    { t: 0, kind: 'tool', sid: 'a', tool: 'mcp__github__search', bytes: 1, seenBytes: 1 },
+    { t: 0, kind: 'skill', sid: 'a', skill: 'review', via: 'tool' },
+  ]
+
+  const score = scoreLines(lines)
+  expect(score.overhead.sessions).toBe(2)
+  expect(score.overhead.measured).toBe(1)
+  expect(score.overhead.mainSentTokens).toBe(50_000)
+  expect(score.overhead.resentFixedTokens).toBe(30_000)
+  expect(score.overhead.loadedTools.CronCreate).toBe(undefined)
+  expect(score.overhead.loadedTools.Workflow).toEqual({ sessions: 2, tokens: 5_000 })
+
+  const text = describeOverhead(score.overhead)
+  expect(text).toContain('Fixed overhead over 2 sessions: about 15k tokens')
+  expect(text).toContain('(System tools 12k, Skills 3k)')
+  expect(text).toContain('that prefix was 60% of main-thread tokens sent (30k)')
+  expect(text).toContain('never called in these logs, largest first (estimated tokens per request): Workflow ~5k, Artifact ~4k, mcp__linear__create ~2k.')
+  expect(text).toContain('never run in these logs, largest first: deploy ~2k, commit ~100.')
+  expect(buildPrompt(score, score, [])).toContain(text)
+})
+
+test('the review says when the fixed overhead was never measured', () => {
+  expect(describeOverhead(scoreLines([]).overhead)).toBe('Fixed overhead: not measured (no sessions logged by spend-bar 0.9.0 or later).')
 })

@@ -34,7 +34,14 @@ function near(actual: unknown, expected: number) {
 
 type UsageAnswer = { value: (typeof USAGE)['value'] & { cost?: { usd: number } } }
 
-function machine(on: Parameters<TestBody>[1], place: Place = WINDOWS, usage: UsageAnswer = USAGE) {
+type Listed = { name: string; description: string; mcp: boolean }
+
+const LISTED: Listed[] = [
+  { name: 'Read', description: '', mcp: false },
+  { name: 'mcp__github__search', description: '', mcp: true },
+]
+
+function machine(on: Parameters<TestBody>[1], place: Place = WINDOWS, usage: UsageAnswer = USAGE, listed: Listed[] = LISTED) {
   const { sep } = place
   // The engine resolves a path that is not absolute on the host against the working directory, so
   // C:\\... arrives under the cwd off Windows: key every file from the fixture's root.
@@ -51,12 +58,7 @@ function machine(on: Parameters<TestBody>[1], place: Place = WINDOWS, usage: Usa
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.usage', () => usage)
-  on('tool.list', () => ({
-    value: [
-      { name: 'Read', description: '', mcp: false },
-      { name: 'mcp__github__search', description: '', mcp: true },
-    ],
-  }))
+  on('tool.list', () => ({ value: listed }))
   on('fs.exists', (_, e) => ({ value: files.has(own(e.path)) || [...files.keys()].some(k => k.startsWith(`${own(e.path)}${sep}`)) }))
   on('fs.stat', (_, e) => ({ value: { kind: 'file', size: files.get(own(e.path))?.length ?? 0, mtimeMs: 0, isLink: false } }))
   on('fs.read', (_, e) => ({ value: files.get(own(e.path)) ?? '' }))
@@ -121,7 +123,7 @@ test('a turn is logged as JSONL lines and added to the day total', async ($, on)
   const log = files.get(`${EVENTS}\\${TODAY}\\sess-1.jsonl`)
   expect(log).toBeTruthy()
   const kinds = log!.trim().split('\n').map(line => JSON.parse(line).kind)
-  expect(kinds).toEqual(['session', 'step', 'tool', 'tool'])
+  expect(kinds).toEqual(['session', 'step', 'overhead', 'tool', 'tool'])
   expect(log!.includes('a.ts')).toBe(false)
 
   const totals = store.get(`day:${TODAY}`) as Record<string, any>
@@ -258,7 +260,7 @@ test('on macOS the log goes under Library/Application Support and old days are r
   expect(logs).toEqual([])
   expect(removed).toEqual([`rm -rf ${MAC.events}/2000-01-01`])
   const log = files.get(`${MAC.events}/${TODAY}/sess-1.jsonl`)
-  expect(log?.trim().split('\n').map(line => JSON.parse(line).kind)).toEqual(['session', 'step'])
+  expect(log?.trim().split('\n').map(line => JSON.parse(line).kind)).toEqual(['session', 'step', 'overhead'])
 })
 
 test('the billed total is kept per day as it grows past the session start', async ($, on) => {
@@ -341,4 +343,88 @@ test('one skill run or compaction seen by several hooks is counted once', async 
   const totals = store.get(`day:${TODAY}`) as Record<string, any>
   expect(totals.skills).toEqual({ commit: 1 })
   expect(totals.compactions).toEqual({ auto: 1 })
+})
+
+test('the first main-thread request records the fixed overhead once, with tools, deferral and skills', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const row = (name: string, tokens: number, kind: 'used' | 'free' | 'buffer' | 'deferred' = 'used') => ({
+    name,
+    tokens,
+    color: 'inactive',
+    isDeferred: kind === 'deferred',
+    kind,
+  })
+  const breakdown = {
+    categories: [
+      row('System prompt', 3000),
+      row('System tools', 12000),
+      row('MCP tools', 900),
+      row('Skills', 2100),
+      row('Messages', 40000),
+      row('MCP tools (deferred)', 5000, 'deferred'),
+      row('Free space', 100000, 'free'),
+    ],
+    totalTokens: 58000,
+    maxTokens: 200000,
+    rawMaxTokens: 200000,
+    percentage: 29,
+    gridRows: [],
+    model: 'claude-opus-5-5',
+    memoryFiles: [],
+    mcpTools: [
+      { name: 'mcp__github__search', serverName: 'github', tokens: 900, isLoaded: true },
+      { name: 'mcp__linear__create', serverName: 'linear', tokens: 5000, isLoaded: false },
+    ],
+    agents: [],
+    skills: { totalSkills: 2, includedSkills: 2, tokens: 2100, skillFrontmatter: [{ name: 'commit', source: 'plugin', tokens: 100 }, { name: 'deploy', source: 'plugin', tokens: 2000 }] },
+    isAutoCompactEnabled: true,
+    apiUsage: null,
+  }
+  const { files, store } = machine(on, WINDOWS, { value: { ...USAGE.value, context: { ...USAGE.value.context, breakdown } } } as never, [
+    { name: 'Read', description: 'short', mcp: false },
+    { name: 'Workflow', description: 'w'.repeat(400), mcp: false },
+    { name: 'CronCreate', description: 'c'.repeat(80), mcp: false },
+    { name: 'mcp__github__search', description: '', mcp: true },
+    { name: 'mcp__linear__create', description: '', mcp: true },
+  ])
+  on('tool.describe', (_, e) => ({ description: e.description, ...(e.isDeferred ? { isDeferred: true } : {}) }))
+  on('turn.step', async function* (_, e) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'end_turn',
+      usage: { model: 'claude-opus-5-5', input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 18000 },
+    }
+  })
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.describe({ tool: 'Workflow', description: 'w'.repeat(4000), provider: { plugin: 'engine', tier: 'core' } } as never)
+  await $.tool.describe({ tool: 'CronCreate', description: 'c'.repeat(80), isDeferred: true, provider: { plugin: 'engine', tier: 'core' } } as never)
+  for await (const _ of $.turn.step({ turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', messageCount: 1, agentId: 'sub-1' } as never)) {
+  }
+  for await (const _ of $.turn.step({ turnId: 'turn-1', index: 1, model: 'claude-opus-5-5', messageCount: 1 })) {
+  }
+  for await (const _ of $.turn.step({ turnId: 'turn-1', index: 2, model: 'claude-opus-5-5', messageCount: 1 })) {
+  }
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  const lines = files.get(`${EVENTS}\\${TODAY}\\sess-1.jsonl`)!.trim().split('\n').map(line => JSON.parse(line))
+  const overhead = lines.filter(line => line.kind === 'overhead')
+  expect(overhead.length).toBe(1)
+  expect(overhead[0].firstRequest).toBe(18005)
+  expect(overhead[0].fixed).toBe(18000)
+  expect(overhead[0].rows).toEqual({ 'System prompt': 3000, 'System tools': 12000, 'MCP tools': 900, Skills: 2100 })
+  expect(overhead[0].skills).toEqual({ commit: 100, deploy: 2000 })
+  expect(overhead[0].tools.Workflow).toEqual({ chars: 4000, deferred: false })
+  expect(overhead[0].tools.CronCreate).toEqual({ chars: 80, deferred: true })
+  expect(overhead[0].tools.Read).toEqual({ chars: 5, deferred: null })
+  expect(overhead[0].tools.mcp__github__search).toEqual({ chars: 0, deferred: false, tokens: 900 })
+  expect(overhead[0].tools.mcp__linear__create).toEqual({ chars: 0, deferred: true, tokens: 5000 })
+
+  const totals = store.get(`day:${TODAY}`) as Record<string, any>
+  expect(totals.overhead).toEqual({ sessions: 1, firstRequestTokens: 18005, measured: 1, fixedTokens: 18000 })
 })

@@ -10,7 +10,7 @@ A bar above the prompt showing:
 - **Prompt cache status**, counted down from the last model response — amber in the last fifth of the TTL, red once expired
 - **Context usage**, as a percentage of the window — amber above 20%, red above 30%
 - A **↓** (Compact) button, hotkey `c` while the bar has focus, that runs `/compact` in the chat, as the session rail does. It reads **↓…** while any compaction runs (automatic ones too) and is dimmed and inactive below 30% context. It turns amber from 40% context, the point to compact by
-- A **$** (Optimize spend) button, hotkey `o`, that scores this session and the past week from the usage stats below and asks Claude for suggestions. It looks at the share of tokens sent above 40% context, turns over 50 requests, shell calls per request, repeated reads by kind, tool results over 20k characters as the model read them (and by the tool's own record), cache rewrites over 100k tokens, the estimated and billed cost, the subagents' share of it and their spend by agent type and model, the most used shell commands and the most common shell errors
+- A **$** (Optimize spend) button, hotkey `o`, that scores this session and the past week from the usage stats below and asks Claude for suggestions. It looks at the share of tokens sent above 40% context, turns over 50 requests, shell calls per request, repeated reads by kind, tool results over 20k characters as the model read them (and by the tool's own record), cache rewrites over 100k tokens, the estimated and billed cost, the subagents' share of it and their spend by agent type and model, the most used shell commands and the most common shell errors, and the fixed overhead below
 
 Toasts warn about the patterns that cost the most:
 
@@ -32,9 +32,21 @@ Warnings only tell you. These two options tell Claude, by adding a note to what 
 
 ## Weekly spend review
 
-`/spend-review` reads the last 7 days of spend-bar's own event logs (and the 7 before, for comparison) and asks Claude to compare this week with the one before: estimated cost by day, the share of tokens sent at high context, long turns, repeated reads, cache rewrites, subagent share and spend by agent type, and the most common shell errors. It sends metadata only, never prompt text. The **$** button gives the shorter review of this session and the past week.
+`/spend-review` reads the last 7 days of spend-bar's own event logs (and the 7 before, for comparison) and asks Claude to compare this week with the one before: estimated cost by day, the share of tokens sent at high context, long turns, repeated reads, cache rewrites, subagent share and spend by agent type, the most common shell errors, and the fixed overhead below. It sends metadata only, never prompt text. The **$** button gives the shorter review of this session and the past week.
 
 To run it every week, set a recurring local reminder (for example `/loop 7d /spend-review`, or a scheduled task that opens a session and runs `/spend-review`). A cloud routine cannot read the logs, which stay on your machine.
+
+## Fixed overhead
+
+Every model request carries the same prefix before any conversation: the system prompt, tool definitions, the skill listing, memory files and custom agent descriptions. After the first main-thread request of each session, spend-bar records that prefix's size by category, as `/context` estimates it, and each tool and skill it loads.
+
+Both reviews then report:
+
+- the average prefix per request, by category, and its share of the main-thread tokens sent. Most of it is read from the prompt cache at the cache-read rate. It is written in full at each session start and after each cache expiry
+- tools loaded in full on every request but never called in the period, largest first. Tools behind ToolSearch (deferred) are left out, because they cost only their name until loaded. MCP tools use `/context`'s token count, and built-in tools an estimate from their description (four characters per token, input schema not counted)
+- skills listed but never run in the period, largest first
+
+Claude is asked to suggest, only for tools and skills you are unlikely to need, the `settings.json` changes that remove them from every request: a bare tool name in `permissions.deny` (a scoped rule such as `Bash(rm *)` blocks calls but keeps the definition), `skillOverrides` with `"off"` or `"user-invocable-only"`, or `disableBundledSkills`. spend-bar never changes your settings itself. Logs from before 0.9.0 have no overhead lines, so the reviews say it was not measured.
 
 ## Output trimming
 
@@ -51,12 +63,13 @@ The bar also records how each session uses tokens, for a later spend review. It 
 - each shell call: the first word of the command (`git`, `gh`, `dotnet`, `npm`, ...) and, when it fails, the first 100 characters of its error text
 - each subagent spawned: its agent type, the id its requests are logged under, the model it runs on, and the model the call asked for, if any (from 0.8.0; earlier spawn lines name the call's model, or the parent's when the call named none, so the review cannot match their requests to a type)
 - compactions (trigger, size before and after), skills run, and the tools and MCP servers loaded at session start
+- once per session, after the first main-thread request: that request's input tokens, the fixed prefix by `/context` category, each skill's listing tokens, and each tool's description length, whether it is deferred and, for MCP tools, its token count (from 0.9.0). Memory file paths are not recorded, only their share of the total
 
 On Team and Enterprise seats, and wherever managed settings are present, Claude Code's built-in security guard (`cc-plugin-sec-default`) sends the `skill.prompt`, `session.compact` and `classic.PostToolBatch` events past installed plugins, which is the "its … hook was skipped" notice. The stats still count those runs: skills from the Skill tool call and from slash commands, and compactions from a `PostCompact` command hook (`scripts/record-compact.sh`). The long-turn brake's note goes out through a `PostToolBatch` command hook (`scripts/brake-note.sh`) for the same reason. What the guard hides is a compaction's size before and after, so those show as empty there.
 
 Each session writes a JSONL file per day to `%LOCALAPPDATA%\claude-toolkit\spend-bar\events\<date>\<session>.jsonl` on Windows, `~/Library/Application Support/claude-toolkit/spend-bar/events/<date>/<session>.jsonl` on macOS, and under `$XDG_STATE_HOME` or `~/.local/state` elsewhere. Estimated costs come from the [list prices](https://platform.claude.com/docs/en/about-claude/pricing) in `hooks/pricing.ts`, with main-thread cache writes at the configured TTL's rate and subagents' at the 5-minute rate, and Haiku 5.5 prompts over 100k tokens at its higher rate; update the table when prices change. Before 0.8.0 Sonnet 5.5 cache reads were priced at twice their list price, so older daily totals overstate Sonnet's cost. Daily totals are kept in the plugin's store. Both are deleted after 30 days. Options: **Collect usage stats** (on by default) and **Stats folder**.
 
-Requires Claude Code 2.1.308 or newer.
+Requires Claude Code 2.1.316 or newer.
 
 ## Install
 
