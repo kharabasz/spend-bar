@@ -78,6 +78,7 @@ const compactionsByAgent = new Map<string, number>()
 const skillSeenAt = new Map<string, number>()
 let compactRecordedAt: number | null = null
 let isOverheadRecorded = false
+const unpricedModels = new Set<string>()
 const describedTools = new Map<string, { chars: number; isDeferred: boolean }>()
 const MESSAGES_ROW = /^messages$/i
 
@@ -390,6 +391,7 @@ export async function statsSessionStarted($: EngineInterface, surface: string | 
     skillSeenAt.clear()
     compactRecordedAt = null
     isOverheadRecorded = false
+    unpricedModels.clear()
     // The baseline: a resumed session has cost this much already, none of it this session's growth.
     billedUsd = (await $.session.usage()).cost?.usd ?? null
     const now = await $.clock.now()
@@ -435,6 +437,10 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
   const ctx = isMain ? contextPercent : null
   // Main-thread writes at the configured TTL; subagents write at the 5-minute rate.
   const usd = costOf(usage, isMain && ttlMs > 5 * MINUTE)
+  if (usd === null && !unpricedModels.has(usage.model)) {
+    unpricedModels.add(usage.model)
+    record({ t: startedAt, kind: 'unpriced', model: usage.model }, () => {})
+  }
   record(
     {
       t: startedAt,
@@ -464,6 +470,8 @@ export function statsStepEnded(e: StepInput, result: StepResult, { previous, sta
         add(day, model, 'usd', usd)
         add(day, [], 'estimatedUsd', usd)
         if (!isMain) add(day, [], 'subagentUsd', usd)
+      } else {
+        add(day, ['unpriced'], usage.model, 1)
       }
       if (!isMain) add(day, [], 'subagentRequests', 1)
       if (e.effort !== undefined) add(day, ['effort'], String(e.effort), 1)

@@ -138,7 +138,60 @@ test('a turn is logged as JSONL lines and added to the day total', async ($, on)
   expect(totals.repeatedReads).toBe(1)
 })
 
-test('tool lines record what the model read and why a read repeats', async ($, on) => {
+async function logSteps($: Parameters<TestBody>[0], on: Parameters<TestBody>[1], model: string, steps: number) {
+  const clock = mock.clock(on, { now: NOW })
+  const { files, store } = machine(on)
+  on('turn.step', async function* (_, e) {
+    return {
+      turnId: e.turnId,
+      index: e.index,
+      answer: '',
+      toolUses: [],
+      stopReason: 'end_turn',
+      usage: { model, input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 300, cache_creation_input_tokens: 40 },
+    }
+  })
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  for (let index = 0; index < steps; index++) {
+    for await (const _ of $.turn.step({ turnId: 'turn-1', index, model, messageCount: 1 })) {
+    }
+  }
+  await $.turn.complete({ turnId: 'turn-1', answer: '', durationMs: 5, isAborted: false, reason: 'answer' })
+  await clock.settle()
+
+  const lines = files
+    .get(`${EVENTS}\\${TODAY}\\sess-1.jsonl`)!
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line) as Record<string, unknown>)
+  return { lines, totals: store.get(`day:${TODAY}`) as Record<string, any> }
+}
+
+test('a Fable 5.2 step is priced at list prices', async ($, on) => {
+  const { lines, totals } = await logSteps($, on, 'claude-fable-5-2', 1)
+
+  const step = lines.find(line => line.kind === 'step')!
+  near(step.usd, 0.00158)
+  near(totals.models['claude-fable-5-2'].usd, 0.00158)
+  near(totals.estimatedUsd, 0.00158)
+  expect(lines.some(line => line.kind === 'unpriced')).toBe(false)
+  expect(totals.unpriced).toBe(undefined)
+})
+
+test('a step on a model with no list price has a null cost and the model is named once', async ($, on) => {
+  const { lines, totals } = await logSteps($, on, 'claude-next-9', 2)
+
+  const steps = lines.filter(line => line.kind === 'step')
+  expect(steps.map(step => step.usd)).toEqual([null, null])
+  expect(lines.filter(line => line.kind === 'unpriced').map(line => line.model)).toEqual(['claude-next-9'])
+  expect(totals.unpriced).toEqual({ 'claude-next-9': 2 })
+  expect(totals.models['claude-next-9'].usd).toBe(undefined)
+  expect(totals.estimatedUsd).toBe(undefined)
+})
+
+test('tool lines record what the model read and why a read repeats',async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const { files, store } = machine(on)
   const whole = 'x'.repeat(250_000)
