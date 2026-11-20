@@ -326,6 +326,9 @@ test('cache reads on Sonnet 5.5 cost a twentieth of input, and Haiku 5.5 prompts
   near(costOf(usage('claude-opus-5-5', 1_000_000), false), 0.2)
   near(costOf(usage('claude-haiku-5-5', 100_000), false), 0.001)
   near(costOf(usage('claude-haiku-5-5', 100_001), false), 0.00500005)
+  near(costOf(usage('claude-fable-5-2', 1_000_000), false), 0.2)
+  near(costOf(usage('claude-mythos-5-2', 1_000_000), false), 0.2)
+  expect(costOf(usage('claude-next-9', 1_000_000), false)).toBe(null)
 })
 
 test('the score splits subagent spend by agent type through the spawn line', () => {
